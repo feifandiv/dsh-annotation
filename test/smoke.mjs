@@ -196,7 +196,8 @@ vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: 'client.js' });
 
 assert.ok(loaded !== null, 'client.js must call window.__ModuleLoader__.load');
-assert.equal(loaded.id, 'dsh-annotation', 'module id must be the package name');
+const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+assert.equal(loaded.id, pkg.name, 'module id must be the package name');
 assert.equal(typeof loaded.factory, 'function', 'module must expose a factory');
 const plugin = loaded.factory(() => ReactStub);
 assert.ok(plugin && typeof plugin.apply === 'function', 'factory must return apply');

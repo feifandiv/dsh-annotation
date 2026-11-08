@@ -1,4 +1,4 @@
 - insert:
     - id: annotation
-      name: 'dsh-annotation'
+      name: '@feifandiv/dsh-annotation'
       config: {}

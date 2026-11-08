@@ -84,7 +84,13 @@ These limits come from how the host renders those surfaces, not from the plugin.
 
 ## Install
 
-This directory is the bundle. Ask the DSH agent to install `/absolute/path/to/annotation` with `plugin_manager` `install_bundle`, then refresh the page once.
+Install from npm:
+
+```bash
+dsh plugin --profile <profile> add @feifandiv/dsh-annotation
+```
+
+Or ask the DSH agent to install the checkout with `plugin_manager` `install_bundle`, then refresh the page once.
 
 Uninstall through Plugin Manager; annotations stay in `localStorage`.
 
