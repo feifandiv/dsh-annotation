@@ -26,6 +26,7 @@ flowchart LR
 | `Cmd/Ctrl + C` with no text selected in the comment box | Copies the passage that opened the box (focusing the box collapses the document selection) |
 | `Esc` | Cancels the comment box |
 | Click the "N notes" card | Expands the quotes and notes; jump to or delete each one |
+| Send with text already in the composer | The typed message and all pending annotations go to the AI as one message (attachments preserved) |
 | Click a numbered dot / highlighted text | Edit or delete that annotation; the number matches its row in the list |
 | Sidebar footer → Annotations | Opens the annotation list as a native **right-sidebar tab** (conversation / documents / other documents), beside the chat instead of over it; jump or delete |
 

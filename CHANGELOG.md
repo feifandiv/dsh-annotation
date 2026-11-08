@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/).
 
+## [2.2.2] - 2026-11-08
+
+### Added
+- Sending from the composer now carries pending annotations with the typed
+  message. When the composer already has text and annotations are pending, the
+  host's send gesture is intercepted once: the typed text and the annotation
+  batch are merged into one message, attachments included, and the annotations
+  are marked sent. With an empty composer the send button is untouched.
+
 ## [2.2.1] - 2026-11-08
 
 ### Fixed

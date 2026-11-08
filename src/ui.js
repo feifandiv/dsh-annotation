@@ -646,6 +646,72 @@ function AnnoPendingCard(props) {
   const runtime = props.runtime;
   annoUseRuntime(runtime);
   const [open, setOpen] = React.useState(false);
+  const inputActions = props.inputActions;
+  const useInput = typeof props.useInput === 'function' ? props.useInput : null;
+  const useSessionStatus = typeof props.useSessionStatus === 'function' ? props.useSessionStatus : null;
+  const draft = useInput ? useInput((state) => (state && typeof state.draft === 'string' ? state.draft : '')) : '';
+  const status = useSessionStatus
+    ? useSessionStatus((map) => (map && props.sessionId ? map[props.sessionId] : null))
+    : null;
+  const draftRef = React.useRef(draft);
+  const statusRef = React.useRef(status);
+  const sendingRef = React.useRef(false);
+  draftRef.current = draft;
+  statusRef.current = status;
+
+  // The composer's send button belongs to the host. When the composer already
+  // has text and annotations are pending, a plain click would send only the
+  // text. Intercept that one gesture and submit the combined message instead,
+  // preserving attachments because the host still performs the submit.
+  React.useEffect(() => {
+    if (!inputActions || typeof inputActions.setDraft !== 'function' || typeof inputActions.submit !== 'function') return undefined;
+    const onClick = (event) => {
+      if (sendingRef.current) return;
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest('[data-dsh-anno-ui]') !== null) return;
+      const button = target.closest('button');
+      if (button === null || button.closest('[data-composer-card]') === null) return;
+      const className = typeof button.className === 'string' ? button.className : '';
+      if (!/(?:^|\s)\S*_primary(?:\s|$)/.test(className)) return;
+      if (button.disabled) return;
+      const state = statusRef.current;
+      // Running/blocked primary is stop/steer/queue; leave it to the host.
+      if (state && (state.running || state.pendingInteraction)) return;
+      const current = typeof draftRef.current === 'string' ? draftRef.current : '';
+      if (current.trim() === '' || current.trimStart().startsWith('/')) return;
+      const pendingNow = runtime.pendingAnnotations();
+      if (pendingNow.length === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const prompt = annoBuildAgentPrompt(pendingNow, { zh: annoIsChineseLocale(runtime) });
+      const combined = current.replace(/\s+$/, '') + '\n\n' + prompt;
+      const ids = pendingNow.map((item) => item.id);
+      sendingRef.current = true;
+      try {
+        inputActions.setDraft(combined);
+      } catch {
+        sendingRef.current = false;
+        runtime.setNotice('failed');
+        return;
+      }
+      window.setTimeout(() => {
+        try {
+          inputActions.submit();
+          runtime.store.markSent(ids);
+          runtime.repaint();
+          runtime.setNotice('sent');
+        } catch {
+          runtime.setNotice('failed');
+        } finally {
+          sendingRef.current = false;
+        }
+      }, 80);
+    };
+    document.addEventListener('click', onClick, true);
+    return () => document.removeEventListener('click', onClick, true);
+  }, [inputActions, runtime]);
+
   const pending = runtime.pendingAnnotations();
   if (pending.length === 0) return null;
   const numbers = annoVisibleAnnotations(runtime.store.list(), {

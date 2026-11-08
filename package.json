@@ -1,6 +1,6 @@
 {
   "name": "@fanfan4589/dsh-annotation",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "Inline annotation for DeepSeek Harness: highlight replies and sidebar documents, comment right next to the text, and send the annotated excerpts to the agent.",
   "type": "module",
   "license": "MIT",
