@@ -1,5 +1,8 @@
 # Annotations — a DSH client plugin
 
+[![npm](https://img.shields.io/npm/v/@fanfan4589/dsh-annotation)](https://www.npmjs.com/package/@fanfan4589/dsh-annotation)
+
+
 Select text in a DeepSeek Harness reply or in a document previewed in the right sidebar; a comment box appears. `Enter` confirms the annotation and collects it into an aggregated "N notes" card above the composer; `Cmd/Ctrl+Enter` sends every pending annotation to the AI in one message.
 
 [中文](README.zh.md)

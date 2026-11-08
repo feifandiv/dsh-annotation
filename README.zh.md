@@ -1,5 +1,8 @@
 # 标注（Annotations）— DSH 客户端插件
 
+[![npm](https://img.shields.io/npm/v/@fanfan4589/dsh-annotation)](https://www.npmjs.com/package/@fanfan4589/dsh-annotation)
+
+
 给 DeepSeek Harness 加「划词标注」：在回复正文或右侧边栏文档里选中文字，浮出评论框；`Enter` 确认后评论进入输入框上方的聚合卡片，`Cmd/Ctrl+Enter` 把全部标注一次发给 AI。
 
 [English](README.md)
