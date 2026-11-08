@@ -646,72 +646,6 @@ function AnnoPendingCard(props) {
   const runtime = props.runtime;
   annoUseRuntime(runtime);
   const [open, setOpen] = React.useState(false);
-  const inputActions = props.inputActions;
-  const useInput = typeof props.useInput === 'function' ? props.useInput : null;
-  const useSessionStatus = typeof props.useSessionStatus === 'function' ? props.useSessionStatus : null;
-  const draft = useInput ? useInput((state) => (state && typeof state.draft === 'string' ? state.draft : '')) : '';
-  const status = useSessionStatus
-    ? useSessionStatus((map) => (map && props.sessionId ? map[props.sessionId] : null))
-    : null;
-  const draftRef = React.useRef(draft);
-  const statusRef = React.useRef(status);
-  const sendingRef = React.useRef(false);
-  draftRef.current = draft;
-  statusRef.current = status;
-
-  // The composer's send button belongs to the host. When the composer already
-  // has text and annotations are pending, a plain click would send only the
-  // text. Intercept that one gesture and submit the combined message instead,
-  // preserving attachments because the host still performs the submit.
-  React.useEffect(() => {
-    if (!inputActions || typeof inputActions.setDraft !== 'function' || typeof inputActions.submit !== 'function') return undefined;
-    const onClick = (event) => {
-      if (sendingRef.current) return;
-      const target = event.target;
-      if (!(target instanceof Element)) return;
-      if (target.closest('[data-dsh-anno-ui]') !== null) return;
-      const button = target.closest('button');
-      if (button === null || button.closest('[data-composer-card]') === null) return;
-      const className = typeof button.className === 'string' ? button.className : '';
-      if (!/(?:^|\s)\S*_primary(?:\s|$)/.test(className)) return;
-      if (button.disabled) return;
-      const state = statusRef.current;
-      // Running/blocked primary is stop/steer/queue; leave it to the host.
-      if (state && (state.running || state.pendingInteraction)) return;
-      const current = typeof draftRef.current === 'string' ? draftRef.current : '';
-      if (current.trim() === '' || current.trimStart().startsWith('/')) return;
-      const pendingNow = runtime.pendingAnnotations();
-      if (pendingNow.length === 0) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const prompt = annoBuildAgentPrompt(pendingNow, { zh: annoIsChineseLocale(runtime) });
-      const combined = current.replace(/\s+$/, '') + '\n\n' + prompt;
-      const ids = pendingNow.map((item) => item.id);
-      sendingRef.current = true;
-      try {
-        inputActions.setDraft(combined);
-      } catch {
-        sendingRef.current = false;
-        runtime.setNotice('failed');
-        return;
-      }
-      window.setTimeout(() => {
-        try {
-          inputActions.submit();
-          runtime.store.markSent(ids);
-          runtime.repaint();
-          runtime.setNotice('sent');
-        } catch {
-          runtime.setNotice('failed');
-        } finally {
-          sendingRef.current = false;
-        }
-      }, 80);
-    };
-    document.addEventListener('click', onClick, true);
-    return () => document.removeEventListener('click', onClick, true);
-  }, [inputActions, runtime]);
-
   const pending = runtime.pendingAnnotations();
   if (pending.length === 0) return null;
   const numbers = annoVisibleAnnotations(runtime.store.list(), {
@@ -821,6 +755,101 @@ function AnnoPendingCard(props) {
         )
       : null,
   );
+}
+
+/**
+ * Session-scoped send bridge. It lives in the composer dock (always mounted
+ * with the composer's standard props) and intercepts exactly one gesture: a
+ * click on the host's primary send button while the composer already has text
+ * and annotations are pending.
+ */
+function AnnoSendBridge(props) {
+  const runtime = props.runtime;
+  const inputActions = props.inputActions;
+  const useInput = typeof props.useInput === 'function' ? props.useInput : null;
+  const useSessionStatus = typeof props.useSessionStatus === 'function' ? props.useSessionStatus : null;
+  const sessionId = props.sessionId;
+  const input = useInput ? useInput((state) => state) : null;
+  const status = useSessionStatus
+    ? useSessionStatus((snapshot) => {
+        if (!snapshot || !sessionId) return null;
+        return typeof snapshot.get === 'function' ? snapshot.get(sessionId) : snapshot[sessionId];
+      })
+    : null;
+  const inputRef = React.useRef(input);
+  const statusRef = React.useRef(status);
+  const sendingRef = React.useRef(false);
+  inputRef.current = input;
+  statusRef.current = status;
+
+  React.useEffect(() => {
+    const note = (ok, reason) => {
+      runtime.diag.composerMerge = { at: Date.now(), ok: ok === true, reason: reason };
+    };
+    const onClick = (event) => {
+      if (sendingRef.current) return;
+      if (!inputActions || typeof inputActions.setDraft !== 'function' || typeof inputActions.submit !== 'function') {
+        note(false, 'input-actions-missing');
+        return;
+      }
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest('[data-dsh-anno-ui]') !== null) return;
+      const button = target.closest('button');
+      if (button === null || button.closest('[data-composer-card]') === null) return;
+      const className = typeof button.className === 'string' ? button.className : '';
+      if (!/(?:^|\s)\S*_primary(?:\s|$)/.test(className)) return;
+      if (button.disabled) {
+        note(false, 'primary-disabled');
+        return;
+      }
+      const sessionState = statusRef.current;
+      if (sessionState && (sessionState.running || sessionState.pendingInteraction)) {
+        note(false, 'session-busy');
+        return;
+      }
+      const state = inputRef.current;
+      const current = state && typeof state.draft === 'string' ? state.draft : '';
+      if (current.trim() === '' || current.trimStart().startsWith('/')) {
+        note(false, 'draft-empty-or-command');
+        return;
+      }
+      const pendingNow = runtime.pendingAnnotations();
+      if (pendingNow.length === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const prompt = annoBuildAgentPrompt(pendingNow, { zh: annoIsChineseLocale(runtime) });
+      const combined = current.replace(/\s+$/, '') + '\n\n' + prompt;
+      const ids = pendingNow.map((item) => item.id);
+      sendingRef.current = true;
+      try {
+        inputActions.setDraft(combined);
+        note(true, 'merged');
+      } catch {
+        sendingRef.current = false;
+        note(false, 'set-draft-failed');
+        runtime.setNotice('failed');
+        return;
+      }
+      window.setTimeout(() => {
+        try {
+          inputActions.submit();
+          runtime.store.markSent(ids);
+          runtime.repaint();
+          runtime.setNotice('sent');
+        } catch {
+          note(false, 'submit-failed');
+          runtime.setNotice('failed');
+        } finally {
+          sendingRef.current = false;
+        }
+      }, 100);
+    };
+    document.addEventListener('click', onClick, true);
+    return () => document.removeEventListener('click', onClick, true);
+  }, [inputActions, runtime]);
+
+  return null;
 }
 
 /** Root overlay entry: pins, toolbar, editor, send bar, panel and toast. */

@@ -124,6 +124,23 @@ function annoApply(ctx) {
   }
 
   try {
+    ctx.slots.inject('conversation.composer.dock', () =>
+      ctx.slots.register(
+        {
+          name: 'conversation.composer.dock',
+          id: 'annotation.send-bridge',
+          order: 100,
+          locale: ANNO_NS,
+          inject: () => ({ runtime }),
+        },
+        AnnoSendBridge,
+      ),
+    );
+  } catch (error) {
+    console.warn('[annotation] composer send bridge registration failed', error);
+  }
+
+  try {
     ctx.slots.inject('sidebar.footer.action', () =>
       ctx.slots.register(
         {
@@ -183,6 +200,7 @@ function annoApply(ctx) {
         docBodies: document.querySelectorAll('[data-textpreview-body]').length,
         toolbar: runtime.state.toolbar !== null,
         editor: runtime.state.editor !== null,
+        composerMerge: runtime.diag.composerMerge || null,
         currentSessionId: runtime.state.currentSessionId,
       }),
       hideForeignSelectionPopup: (enabled) => {

@@ -206,7 +206,7 @@ assert.equal(JSON.stringify(plugin.inject), JSON.stringify(['slots', 'locale', '
 plugin.apply(ctx);
 
 const owners = registrations.map((entry) => entry.owner);
-assert.equal(JSON.stringify(owners.sort()), JSON.stringify(['conversation.input.overlay', 'shell.overlay', 'sidebar.footer.action', 'sidebar.right.pane.tab']));
+assert.equal(JSON.stringify(owners.sort()), JSON.stringify(['conversation.composer.dock', 'conversation.input.overlay', 'shell.overlay', 'sidebar.footer.action', 'sidebar.right.pane.tab']));
 const overlay = registrations.find((entry) => entry.owner === 'shell.overlay');
 assert.equal(typeof overlay.component, 'function');
 assert.equal(typeof overlay.options.inject, 'function');
