@@ -1,0 +1,61 @@
+{
+  "name": "dsh-annotation",
+  "version": "2.2.0",
+  "description": "Inline annotation for DeepSeek Harness: highlight replies and sidebar documents, comment right next to the text, and send the annotated excerpts to the agent.",
+  "type": "module",
+  "license": "MIT",
+  "author": "feifandiv",
+  "homepage": "https://github.com/feifandiv/dsh-annotation#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/feifandiv/dsh-annotation.git"
+  },
+  "bugs": {
+    "url": "https://github.com/feifandiv/dsh-annotation/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "annotation",
+    "highlight",
+    "inline-comment"
+  ],
+  "engines": {
+    "dsh": ">=0.2.1-rc.1"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "README.zh.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/core.test.mjs && node test/smoke.mjs",
+    "check": "node tools/validate.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
+    }
+  }
+}

@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build client bundle
+        run: node build.mjs
+      - name: Bundle is up to date
+        run: git diff --exit-code -- client.js
+      - name: Syntax checks
+        run: |
+          node --check client.js
+          node --check index.js
+      - name: Pure-logic tests
+        run: node --test test/core.test.mjs
+      - name: Loader and render smoke test
+        run: node test/smoke.mjs
+      - name: Bundle validation
+        run: node tools/validate.mjs
