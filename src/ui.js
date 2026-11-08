@@ -157,6 +157,23 @@ function AnnoToolbar(props) {
       placeholder: t('toolbar.placeholder'),
       'aria-label': t('toolbar.placeholder'),
       onChange: (event) => setNote(event.target.value),
+      // Focusing the comment box collapses the document selection. When the
+      // textarea itself has no selection, Cmd/Ctrl+C (or Edit → Copy) copies
+      // the passage that opened the box instead of copying nothing.
+      onCopy: (event) => {
+        const area = event.currentTarget;
+        if (!area || area.selectionStart !== area.selectionEnd) return;
+        const text = typeof payload.text === 'string' ? payload.text : '';
+        if (text === '') return;
+        event.preventDefault();
+        try {
+          if (event.clipboardData) event.clipboardData.setData('text/plain', text);
+          else annoCopyPlain(text);
+          runtime.setNotice('copied');
+        } catch {
+          /* let the browser fall back when the clipboard is unavailable */
+        }
+      },
       onKeyDown: (event) => {
         // Let the IME commit its composition: Enter there selects a candidate,
         // it must not confirm and dismiss the comment box.
@@ -583,6 +600,7 @@ function AnnoNotice(props) {
     failed: t('send.failed'),
     tabFailed: t('side.failed'),
     cleaned: t('side.cleaned'),
+    copied: t('copy.done'),
   };
   const text = map[notice] || '';
   if (text === '') return null;

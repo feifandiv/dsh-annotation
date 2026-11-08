@@ -48,6 +48,7 @@ export const ANNO_ZH = {
   "side.cleanOthers": "清理其他会话",
   "side.cleanHint": "已删除会话的标注会自动清理；归档会话的标注会保留",
   "side.cleaned": "已清理标注",
+  "copy.done": "已复制原文",
 };
 
 export const ANNO_EN = {
@@ -94,4 +95,5 @@ export const ANNO_EN = {
   "side.cleanOthers": "Clean other sessions",
   "side.cleanHint": "Annotations of deleted sessions are pruned automatically; archived sessions keep theirs",
   "side.cleaned": "Annotations cleaned up",
+  "copy.done": "Selected text copied",
 };

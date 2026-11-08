@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/).
 
+## [2.2.1] - 2026-11-08
+
+### Fixed
+- Focusing the annotation comment box collapsed the document selection, so
+  Cmd/Ctrl+C copied nothing. With no text selected inside the comment box, the
+  copy shortcut (or Edit → Copy) now copies the annotated passage; selecting
+  part of the note still uses the normal copy behaviour.
+
 ## [2.2.0] - 2026-11-08
 
 ### Added

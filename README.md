@@ -23,6 +23,7 @@ flowchart LR
 | Type + `Enter` | Confirms the annotation; it is collected into the "N notes" card above the composer |
 | `Cmd/Ctrl + Enter` | Confirms and immediately sends **all pending** annotations to the AI (works inside the comment box or while no input is focused) |
 | `Shift + Enter` | Newline inside the comment |
+| `Cmd/Ctrl + C` with no text selected in the comment box | Copies the passage that opened the box (focusing the box collapses the document selection) |
 | `Esc` | Cancels the comment box |
 | Click the "N notes" card | Expands the quotes and notes; jump to or delete each one |
 | Click a numbered dot / highlighted text | Edit or delete that annotation; the number matches its row in the list |
