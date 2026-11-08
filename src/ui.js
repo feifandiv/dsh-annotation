@@ -795,8 +795,10 @@ function AnnoSendBridge(props) {
       const target = event.target;
       if (!(target instanceof Element)) return;
       if (target.closest('[data-dsh-anno-ui]') !== null) return;
+      const card = target.closest('[data-composer-card]');
+      if (card === null) return;
       const button = target.closest('button');
-      if (button === null || button.closest('[data-composer-card]') === null) return;
+      if (button === null) return;
       const className = typeof button.className === 'string' ? button.className : '';
       if (!/(?:^|\s)\S*_primary(?:\s|$)/.test(className)) return;
       if (button.disabled) {
@@ -845,8 +847,61 @@ function AnnoSendBridge(props) {
         }
       }, 100);
     };
+    const onKeyDown = (event) => {
+      if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) return;
+      if (event.isComposing || event.keyCode === 229) return;
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest('[data-dsh-anno-ui]') !== null) return;
+      if (target.closest('[data-composer-card]') === null) return;
+      if (target.closest('[contenteditable="true"]') === null) return;
+      if (document.querySelector('[data-composer-command]') !== null) return;
+      if (!inputActions || typeof inputActions.setDraft !== 'function' || typeof inputActions.submit !== 'function') return;
+      const state = inputRef.current;
+      if (!state || state.phase !== 'plain') return;
+      const current = typeof state.draft === 'string' ? state.draft : '';
+      if (current.trim() === '' || current.trimStart().startsWith('/')) return;
+      const sessionState = statusRef.current;
+      if (sessionState && (sessionState.running || sessionState.pendingInteraction)) return;
+      const pendingNow = runtime.pendingAnnotations();
+      if (pendingNow.length === 0) return;
+      const primary = document.querySelector('[data-composer-card] button[class*="_primary"]');
+      if (primary && primary.disabled) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const prompt = annoBuildAgentPrompt(pendingNow, { zh: annoIsChineseLocale(runtime) });
+      const combined = current.replace(/\s+$/, '') + '\n\n' + prompt;
+      const ids = pendingNow.map((item) => item.id);
+      sendingRef.current = true;
+      try {
+        inputActions.setDraft(combined);
+        runtime.diag.composerMerge = { at: Date.now(), ok: true, reason: 'merged-enter' };
+      } catch {
+        sendingRef.current = false;
+        runtime.diag.composerMerge = { at: Date.now(), ok: false, reason: 'set-draft-failed' };
+        runtime.setNotice('failed');
+        return;
+      }
+      window.setTimeout(() => {
+        try {
+          inputActions.submit();
+          runtime.store.markSent(ids);
+          runtime.repaint();
+          runtime.setNotice('sent');
+        } catch {
+          runtime.diag.composerMerge = { at: Date.now(), ok: false, reason: 'submit-failed' };
+          runtime.setNotice('failed');
+        } finally {
+          sendingRef.current = false;
+        }
+      }, 100);
+    };
     document.addEventListener('click', onClick, true);
-    return () => document.removeEventListener('click', onClick, true);
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      document.removeEventListener('click', onClick, true);
+      document.removeEventListener('keydown', onKeyDown, true);
+    };
   }, [inputActions, runtime]);
 
   return null;

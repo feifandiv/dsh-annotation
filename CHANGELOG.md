@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/).
 
+## [2.2.3] - 2026-11-08
+
+### Changed
+- Removed the temporary on-screen composer diagnostic HUD and debug toasts.
+- The composer merge covers both gestures: a click on the host send button and
+  Enter in the composer, while the composer has text and annotations are
+  pending.
+
 ## [2.2.2] - 2026-11-08
 
 ### Added
