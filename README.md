@@ -87,7 +87,7 @@ These limits come from how the host renders those surfaces, not from the plugin.
 Install from npm:
 
 ```bash
-dsh plugin --profile <profile> add @feifandiv/dsh-annotation
+dsh plugin --profile <profile> add @fanfan4589/dsh-annotation
 ```
 
 Or ask the DSH agent to install the checkout with `plugin_manager` `install_bundle`, then refresh the page once.

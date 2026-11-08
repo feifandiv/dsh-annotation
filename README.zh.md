@@ -87,7 +87,7 @@ flowchart LR
 从 npm 安装：
 
 ```bash
-dsh plugin --profile <profile> add @feifandiv/dsh-annotation
+dsh plugin --profile <profile> add @fanfan4589/dsh-annotation
 ```
 
 或对 DSH Agent 说「把 `/absolute/path/to/dsh-annotation` 这个插件装上」，用 `plugin_manager` 的 `install_bundle` 指向该目录。装好后刷新一次页面。

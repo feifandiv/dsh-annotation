@@ -1,6 +1,6 @@
 # Releasing
 
-Package: `@feifandiv/dsh-annotation` · Repository: <https://github.com/feifandiv/dsh-annotation>
+Package: `@fanfan4589/dsh-annotation` · Repository: <https://github.com/feifandiv/dsh-annotation>
 
 ## 1. Build and verify
 
@@ -17,7 +17,7 @@ node tools/validate.mjs
 ```bash
 npm login
 npm publish --access public
-npm view @feifandiv/dsh-annotation version
+npm view @fanfan4589/dsh-annotation version
 ```
 
 The scoped package must be public; `publishConfig.access` is already set.
@@ -25,7 +25,7 @@ The scoped package must be public; `publishConfig.access` is already set.
 ## 3. Verify a clean install
 
 ```bash
-dsh plugin --profile <test-profile> add @feifandiv/dsh-annotation
+dsh plugin --profile <test-profile> add @fanfan4589/dsh-annotation
 ```
 
 ## 4. Submit to the community catalog
