@@ -70,7 +70,8 @@ These limits come from how the host renders those surfaces, not from the plugin.
 - Annotations live in `localStorage`; the list only shows **chat annotations of the active session plus document annotations**.
 - **Deleted session** — its chat annotations are pruned automatically after startup or when the list is opened. The automatic pass only runs once the session index is stable across two counts, so a partially loaded sidebar is never mistaken for deleted sessions.
 - **Archived session** — its annotations are kept because the session can be reopened. They do not count toward the active session badge; use "Clean up → Clean other sessions" to remove them.
-- **Sent annotations** — highlights and list rows stay until you choose "Clean up → Clean sent annotations".
+- **Document annotations** — removed about a second after the batch is sent, and stale sent document annotations are pruned on load, so PDF highlights do not survive into a later modification round.
+- **Conversation annotations** — sent highlights and list rows stay until you choose "Clean up → Clean sent annotations".
 - **Document annotations** — tied to the file path and never auto-pruned; delete them row by row if needed.
 
 ## How it works

@@ -202,7 +202,7 @@ assert.equal(typeof loaded.factory, 'function', 'module must expose a factory');
 const plugin = loaded.factory(() => ReactStub);
 assert.ok(plugin && typeof plugin.apply === 'function', 'factory must return apply');
 assert.ok(Array.isArray(plugin.inject), 'factory must return an inject list');
-assert.equal(JSON.stringify(plugin.inject), JSON.stringify(['slots', 'locale', 'sessions']));
+assert.equal(JSON.stringify(plugin.inject), JSON.stringify(['slots', 'locale', 'sessions', 'sidebarRight', 'sidebarRightTabs']));
 plugin.apply(ctx);
 
 const owners = registrations.map((entry) => entry.owner);

@@ -839,6 +839,7 @@ function AnnoSendBridge(props) {
           runtime.store.markSent(ids);
           runtime.repaint();
           runtime.setNotice('sent');
+          runtime.scheduleDocumentCleanup(ids);
         } catch {
           note(false, 'submit-failed');
           runtime.setNotice('failed');
@@ -888,6 +889,7 @@ function AnnoSendBridge(props) {
           runtime.store.markSent(ids);
           runtime.repaint();
           runtime.setNotice('sent');
+          runtime.scheduleDocumentCleanup(ids);
         } catch {
           runtime.diag.composerMerge = { at: Date.now(), ok: false, reason: 'submit-failed' };
           runtime.setNotice('failed');

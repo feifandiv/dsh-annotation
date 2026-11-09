@@ -1715,6 +1715,8 @@ function annoCreateRuntime(ctx) {
     },
     paintedRanges: new Map(),
     pruneSize: 0,
+    tabRegistered: false,
+    tabDispose: null,
     diag: {
       enabled: annoReadDebugFlag(),
       engineAttached: false,
@@ -1801,6 +1803,7 @@ function annoCreateRuntime(ctx) {
           runtime.store.markSent(ids);
           runtime.repaint();
           runtime.setNotice('sent');
+          runtime.scheduleDocumentCleanup(ids);
         })
         .catch(() => runtime.setNotice('failed'));
       return true;
@@ -1974,9 +1977,60 @@ function annoCreateRuntime(ctx) {
       if (removed > 0) runtime.setNotice('cleaned');
       return removed;
     },
+    /** Register the right-sidebar annotation tab type; safe to retry. */
+    registerAnnotationsTab() {
+      if (runtime.tabRegistered) return true;
+      let tabs = null;
+      try {
+        tabs = ctx && typeof ctx.get === 'function' ? ctx.get('sidebarRightTabs') : null;
+      } catch {
+        tabs = null;
+      }
+      if (!tabs || typeof tabs.register !== 'function') return false;
+      try {
+        const dispose = tabs.register({
+          id: ANNO_TAB_ID,
+          kind: ANNO_TAB_KIND,
+          priority: 'extension',
+          title: () => (annoIsChineseLocale(runtime) ? '标注' : 'Annotations'),
+        });
+        runtime.tabDispose = typeof dispose === 'function' ? dispose : null;
+        runtime.tabRegistered = true;
+        return true;
+      } catch (error) {
+        const message = String(error && error.message ? error.message : error);
+        if (message.includes('already registered')) {
+          runtime.tabRegistered = true;
+          return true;
+        }
+        console.warn('[annotation] sidebar tab type registration failed', error);
+        return false;
+      }
+    },
+    /** Sent document annotations are transient: drop them after the send settles. */
+    scheduleDocumentCleanup(ids) {
+      const list = Array.isArray(ids) ? ids : [];
+      const docIds = list.filter((id) => {
+        const annotation = runtime.store.find(id);
+        return annotation !== null && annotation.source === 'document';
+      });
+      if (docIds.length === 0) return;
+      window.setTimeout(() => {
+        runtime.store.removeMany(docIds);
+        runtime.repaint();
+      }, 1200);
+    },
+    /** Remove sent document annotations left over from earlier rounds. */
+    cleanupSentDocuments() {
+      const ids = runtime.store.list()
+        .filter((item) => item.source === 'document' && annoIsSent(item))
+        .map((item) => item.id);
+      return runtime.store.removeMany(ids);
+    },
     /** Open (or focus) the annotation list as a native right-sidebar tab. */
     openAnnotationsTab() {
       runtime.pruneDeletedSessions();
+      runtime.registerAnnotationsTab();
       let sidebarRight = null;
       try {
         sidebarRight = ctx && typeof ctx.get === 'function' ? ctx.get('sidebarRight') : null;
@@ -1988,10 +2042,30 @@ function annoCreateRuntime(ctx) {
         sidebarRight.openTab(ANNO_TAB_KIND);
         return true;
       } catch {
+        // A hot reload can leave the registry empty even though the body slot
+        // survived; retry registration once before reporting failure.
+        runtime.tabRegistered = false;
+        if (runtime.registerAnnotationsTab()) {
+          try {
+            sidebarRight.openTab(ANNO_TAB_KIND);
+            return true;
+          } catch {
+            return false;
+          }
+        }
         return false;
       }
     },
     dispose() {
+      if (typeof runtime.tabDispose === 'function') {
+        try {
+          runtime.tabDispose();
+        } catch {
+          /* ignore */
+        }
+      }
+      runtime.tabDispose = null;
+      runtime.tabRegistered = false;
       if (runtime.repaintTimer) window.clearTimeout(runtime.repaintTimer);
       runtime.repaintTimer = 0;
       if (runtime.noticeTimer) window.clearTimeout(runtime.noticeTimer);
@@ -3237,6 +3311,7 @@ function AnnoSendBridge(props) {
           runtime.store.markSent(ids);
           runtime.repaint();
           runtime.setNotice('sent');
+          runtime.scheduleDocumentCleanup(ids);
         } catch {
           note(false, 'submit-failed');
           runtime.setNotice('failed');
@@ -3286,6 +3361,7 @@ function AnnoSendBridge(props) {
           runtime.store.markSent(ids);
           runtime.repaint();
           runtime.setNotice('sent');
+          runtime.scheduleDocumentCleanup(ids);
         } catch {
           runtime.diag.composerMerge = { at: Date.now(), ok: false, reason: 'submit-failed' };
           runtime.setNotice('failed');
@@ -3592,7 +3668,7 @@ const ANNO_EN = {
  */
 
 const ANNO_NS = 'annotation';
-const ANNO_INJECT = ['slots', 'locale', 'sessions'];
+const ANNO_INJECT = ['slots', 'locale', 'sessions', 'sidebarRight', 'sidebarRightTabs'];
 const ANNO_PLUGIN_ID = 'dsh-annotation';
 
 /** Last mounted runtime, for the optional debugging handle. */
@@ -3618,24 +3694,13 @@ function annoApply(ctx) {
   }
 
   // Native right-sidebar tab type: the annotation list docks beside documents
-  // instead of covering the conversation in a centered dialog.
-  try {
-    const tabRegistry = typeof ctx.get === 'function' ? ctx.get('sidebarRightTabs') : null;
-    if (tabRegistry && typeof tabRegistry.register === 'function') {
-      ctx.effect(
-        () =>
-          tabRegistry.register({
-            id: ANNO_TAB_ID,
-            kind: ANNO_TAB_KIND,
-            priority: 'extension',
-            title: () => (annoIsChineseLocale(runtime) ? '标注' : 'Annotations'),
-          }),
-        'annotation: sidebar tab type',
-      );
-    }
-  } catch (error) {
-    console.warn('[annotation] sidebar tab type registration failed', error);
-  }
+  // instead of covering the conversation in a centered dialog. The registry is
+  // injected above, and the runtime keeps a lazy retry for compositions that
+  // mount it late.
+  runtime.registerAnnotationsTab();
+  // Document annotations are transient by design: a sent PDF/doc highlight
+  // must not survive into the next modification round.
+  runtime.cleanupSentDocuments();
 
   ctx.effect(() => {
     const style = document.createElement('style');
@@ -3785,6 +3850,7 @@ function annoApply(ctx) {
         toolbar: runtime.state.toolbar !== null,
         editor: runtime.state.editor !== null,
         composerMerge: runtime.diag.composerMerge || null,
+        annotationsTab: runtime.tabRegistered === true,
         currentSessionId: runtime.state.currentSessionId,
       }),
       hideForeignSelectionPopup: (enabled) => {

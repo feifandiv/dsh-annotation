@@ -8,7 +8,7 @@
  */
 
 const ANNO_NS = 'annotation';
-const ANNO_INJECT = ['slots', 'locale', 'sessions'];
+const ANNO_INJECT = ['slots', 'locale', 'sessions', 'sidebarRight', 'sidebarRightTabs'];
 const ANNO_PLUGIN_ID = 'dsh-annotation';
 
 /** Last mounted runtime, for the optional debugging handle. */
@@ -34,24 +34,13 @@ function annoApply(ctx) {
   }
 
   // Native right-sidebar tab type: the annotation list docks beside documents
-  // instead of covering the conversation in a centered dialog.
-  try {
-    const tabRegistry = typeof ctx.get === 'function' ? ctx.get('sidebarRightTabs') : null;
-    if (tabRegistry && typeof tabRegistry.register === 'function') {
-      ctx.effect(
-        () =>
-          tabRegistry.register({
-            id: ANNO_TAB_ID,
-            kind: ANNO_TAB_KIND,
-            priority: 'extension',
-            title: () => (annoIsChineseLocale(runtime) ? '标注' : 'Annotations'),
-          }),
-        'annotation: sidebar tab type',
-      );
-    }
-  } catch (error) {
-    console.warn('[annotation] sidebar tab type registration failed', error);
-  }
+  // instead of covering the conversation in a centered dialog. The registry is
+  // injected above, and the runtime keeps a lazy retry for compositions that
+  // mount it late.
+  runtime.registerAnnotationsTab();
+  // Document annotations are transient by design: a sent PDF/doc highlight
+  // must not survive into the next modification round.
+  runtime.cleanupSentDocuments();
 
   ctx.effect(() => {
     const style = document.createElement('style');
@@ -201,6 +190,7 @@ function annoApply(ctx) {
         toolbar: runtime.state.toolbar !== null,
         editor: runtime.state.editor !== null,
         composerMerge: runtime.diag.composerMerge || null,
+        annotationsTab: runtime.tabRegistered === true,
         currentSessionId: runtime.state.currentSessionId,
       }),
       hideForeignSelectionPopup: (enabled) => {

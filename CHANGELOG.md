@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/).
 
+## [2.3.0] - 2026-11-09
+
+### Fixed
+- The annotation list tab now opens reliably after an app restart. The
+  sidebar services are declared as injected dependencies instead of being
+  looked up during a startup race, and `openTab` retries registration once
+  before reporting failure.
+- Sent document annotations are transient: they are removed shortly after the
+  batch is sent, and stale sent document annotations are pruned on plugin load.
+  PDF/document highlights therefore do not survive into a later modification
+  round.
+
 ## [2.2.3] - 2026-11-08
 
 ### Changed
