@@ -7,6 +7,8 @@ Select text in a DeepSeek Harness reply or in a document previewed in the right 
 
 [中文](README.zh.md)
 
+> **Scope — a small, restrained patch.** It does one thing and leaves the rest of DSH alone: no built-in slot or layout replaced, no core behaviour touched, no other plugin's data read or written. Upgrading DSH normally needs no change here; disabling or uninstalling restores the stock UI.
+
 ```mermaid
 flowchart LR
   A[Select text] --> B[Comment box appears]
