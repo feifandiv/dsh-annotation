@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Annotations",
-    "description": "Highlight and annotate DeepSeek replies and sidebar documents, then manage every annotation in one panel."
+    "description": "Highlight and annotate DeepSeek replies, sidebar documents and HTML page previews, then send the notes to the AI; a sent batch is cleaned up, with no sidebar list."
   }
 }

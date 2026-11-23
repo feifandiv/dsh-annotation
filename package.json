@@ -1,7 +1,7 @@
 {
   "name": "@fanfan4589/dsh-annotation",
-  "version": "2.3.0",
-  "description": "Inline annotation for DeepSeek Harness: highlight replies and sidebar documents, comment right next to the text, and send the annotated excerpts to the agent.",
+  "version": "2.5.0",
+  "description": "Inline annotation for DeepSeek Harness: highlight replies, sidebar documents and HTML previews, comment right next to the text, and send the annotated excerpts to the agent.",
   "type": "module",
   "license": "MIT",
   "author": "feifandiv",
@@ -19,7 +19,8 @@
     "deepseek-harness",
     "annotation",
     "highlight",
-    "inline-comment"
+    "inline-comment",
+    "html"
   ],
   "engines": {
     "dsh": ">=0.2.1-rc.1"
@@ -43,7 +44,7 @@
   ],
   "scripts": {
     "build": "node build.mjs",
-    "test": "node --test test/core.test.mjs && node test/smoke.mjs",
+    "test": "node --test test/core.test.mjs test/html.test.mjs && node test/smoke.mjs",
     "check": "node tools/validate.mjs"
   },
   "dsh": {

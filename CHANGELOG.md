@@ -4,6 +4,46 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/).
 
+## [2.5.0] - 2026-11-13
+
+### Removed
+- The sidebar footer "Annotations" entry and the right-sidebar annotation list
+  tab are gone. The list repeated what the page already shows through highlights
+  and numbered dots, and it was not used in practice.
+
+### Changed
+- A sent batch is now cleared from storage and the page immediately, for every
+  source (chat and documents), not only document previews. The message to the
+  agent carries each quote and note, so no local backup is kept; stale sent
+  annotations are also pruned on load.
+- Numbering now covers only what is visible — chat annotations of the active
+  session plus annotations in the documents currently open. Annotations of other
+  sessions, unopened documents and sent rows take no number, so a single new
+  annotation starts at 01 and every send resets the sequence.
+- Editing and deleting a single annotation now happens only from its numbered
+  dot (composer card rows keep their jump/delete controls for unsent items).
+
+## [2.4.0] - 2026-11-13
+
+### Added
+- HTML page previews in the right sidebar are annotatable. The plugin registers
+  an external `.html`/`.htm` document implementation that outranks the builtin
+  one and runs the page in the same opaque-origin sandbox, plus a small bridge
+  inside the frame. Selecting text, painting highlights, numbered pins, jump,
+  edit and send all work as they do for Markdown and PDFs.
+- Relative classic scripts and stylesheets are inlined as data URLs under the
+  document's own session authority, so a local report keeps its styling.
+- The builtin HTML preview stays selectable in the preview's implementation
+  menu; switching to it returns to the unannotated, script-isolated view.
+
+### Notes
+- The annotatable renderer is only registered while the host's developer tools
+  (interactive HTML preview) are enabled. With them off the static, sanitized
+  preview remains in force and HTML annotation is unavailable.
+- Images referenced relatively, module scripts and dynamic fetches are not
+  packed; the frame has no same-origin access to the parent, so they behave as
+  they do in the builtin interactive preview.
+
 ## [2.3.0] - 2026-11-09
 
 ### Fixed

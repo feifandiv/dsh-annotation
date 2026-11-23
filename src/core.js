@@ -194,12 +194,6 @@ export function annoNormalizeAnnotation(raw, now) {
   return annotation;
 }
 
-/** Fixed identity of the right-sidebar annotations tab. */
-export const ANNO_TAB_ID = 'dsh-annotation';
-
-/** Tab kind opened through the right-sidebar navigation controller. */
-export const ANNO_TAB_KIND = 'annotation';
-
 /** Creation order used for numbering and list ordering. */
 function annoCreatedOrder(a, b) {
   const left = typeof a.createdAt === 'number' ? a.createdAt : 0;
@@ -210,22 +204,42 @@ function annoCreatedOrder(a, b) {
 
 /**
  * Annotations a reader can currently reach: chat rows of the active session
- * plus every document annotation. Old chat annotations from other sessions stay
- * in storage but are not counted or listed. Numbers are assigned in creation
- * order so pins, the composer card and the sidebar list always agree.
+ * plus annotations of the documents open in it. Storage may hold unsent
+ * annotations of other sessions or unopened documents; they are not numbered,
+ * so the visible set starts at 1 and does not shift between sessions. Numbers
+ * are assigned in creation order so pins and the composer card always agree.
  */
 export function annoVisibleAnnotations(list, options) {
   const opts = options || {};
   const sessionId = typeof opts.sessionId === 'string' ? opts.sessionId : null;
+  // With `openDocs`, only annotations of documents open in this conversation
+  // are visible; without it every document annotation is considered, which is
+  // the offline/test default. Sent annotations never take a number.
+  const scoped = Array.isArray(opts.openDocs);
+  const openKeys = new Set();
+  const openPaths = new Set();
+  if (scoped) {
+    for (const entry of opts.openDocs) {
+      if (!entry) continue;
+      if (typeof entry.docKey === 'string' && entry.docKey !== '') openKeys.add(entry.docKey);
+      if (typeof entry.path === 'string' && entry.path !== '') openPaths.add(entry.path);
+    }
+  }
   const chat = [];
   const documents = [];
   for (const item of Array.isArray(list) ? list : []) {
-    if (!item) continue;
+    if (!item || annoIsSent(item)) continue;
     if (item.source === 'chat') {
       if (sessionId !== null && item.sessionId === sessionId) chat.push(item);
       continue;
     }
-    if (item.source === 'document') documents.push(item);
+    if (item.source !== 'document') continue;
+    if (scoped) {
+      const byKey = typeof item.docKey === 'string' && openKeys.has(item.docKey);
+      const byPath = annoPathIsAbsolute(item.path) && openPaths.has(item.path);
+      if (!byKey && !byPath) continue;
+    }
+    documents.push(item);
   }
   chat.sort(annoCreatedOrder);
   documents.sort(annoCreatedOrder);

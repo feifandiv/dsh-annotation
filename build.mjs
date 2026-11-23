@@ -18,8 +18,10 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const read = (relative) => fs.readFileSync(path.join(root, relative), 'utf8');
 
-const sources = ['src/core.js', 'src/engine.js', 'src/ui.js', 'src/strings.js', 'src/plugin.js'];
-const stripExports = (source) => source.replace(/^export\s+(?=(?:function|const|let|class)\b)/gm, '');
+const sources = ['src/core.js', 'src/html.js', 'src/engine.js', 'src/ui.js', 'src/strings.js', 'src/plugin.js'];
+const stripExports = (source) => source
+  .replace(/^export\s+(?=async\s+function\b)/gm, '')
+  .replace(/^export\s+(?=(?:function|const|let|class)\b)/gm, '');
 const chunks = sources.map((file) => {
   const body = stripExports(read(file)).trimEnd();
   return `/* ---- ${file} ---- */\n${body}\n`;

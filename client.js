@@ -202,12 +202,6 @@ function annoNormalizeAnnotation(raw, now) {
   return annotation;
 }
 
-/** Fixed identity of the right-sidebar annotations tab. */
-const ANNO_TAB_ID = 'dsh-annotation';
-
-/** Tab kind opened through the right-sidebar navigation controller. */
-const ANNO_TAB_KIND = 'annotation';
-
 /** Creation order used for numbering and list ordering. */
 function annoCreatedOrder(a, b) {
   const left = typeof a.createdAt === 'number' ? a.createdAt : 0;
@@ -218,22 +212,42 @@ function annoCreatedOrder(a, b) {
 
 /**
  * Annotations a reader can currently reach: chat rows of the active session
- * plus every document annotation. Old chat annotations from other sessions stay
- * in storage but are not counted or listed. Numbers are assigned in creation
- * order so pins, the composer card and the sidebar list always agree.
+ * plus annotations of the documents open in it. Storage may hold unsent
+ * annotations of other sessions or unopened documents; they are not numbered,
+ * so the visible set starts at 1 and does not shift between sessions. Numbers
+ * are assigned in creation order so pins and the composer card always agree.
  */
 function annoVisibleAnnotations(list, options) {
   const opts = options || {};
   const sessionId = typeof opts.sessionId === 'string' ? opts.sessionId : null;
+  // With `openDocs`, only annotations of documents open in this conversation
+  // are visible; without it every document annotation is considered, which is
+  // the offline/test default. Sent annotations never take a number.
+  const scoped = Array.isArray(opts.openDocs);
+  const openKeys = new Set();
+  const openPaths = new Set();
+  if (scoped) {
+    for (const entry of opts.openDocs) {
+      if (!entry) continue;
+      if (typeof entry.docKey === 'string' && entry.docKey !== '') openKeys.add(entry.docKey);
+      if (typeof entry.path === 'string' && entry.path !== '') openPaths.add(entry.path);
+    }
+  }
   const chat = [];
   const documents = [];
   for (const item of Array.isArray(list) ? list : []) {
-    if (!item) continue;
+    if (!item || annoIsSent(item)) continue;
     if (item.source === 'chat') {
       if (sessionId !== null && item.sessionId === sessionId) chat.push(item);
       continue;
     }
-    if (item.source === 'document') documents.push(item);
+    if (item.source !== 'document') continue;
+    if (scoped) {
+      const byKey = typeof item.docKey === 'string' && openKeys.has(item.docKey);
+      const byPath = annoPathIsAbsolute(item.path) && openPaths.has(item.path);
+      if (!byKey && !byPath) continue;
+    }
+    documents.push(item);
   }
   chat.sort(annoCreatedOrder);
   documents.sort(annoCreatedOrder);
@@ -501,6 +515,967 @@ function annoExportPayload(list, meta) {
     ...(meta && typeof meta === 'object' ? meta : {}),
     annotations: annoNormalizeList(list),
   };
+}
+
+/* ---- src/html.js ---- */
+/**
+ * Annotatable HTML document renderer.
+ *
+ * The shipped HTML preview runs the page in an opaque-origin iframe
+ * (`sandbox="allow-scripts"`, no `allow-same-origin`), so the parent page cannot
+ * read its selection or paint its ranges. This renderer registers an external
+ * document implementation for `.html`/`.htm` (which outranks the builtin one) and
+ * runs its own copy of the page in the same kind of sandbox, but with a small
+ * bridge script inside. The bridge owns everything that needs the frame's own
+ * DOM: quote extraction, re-anchoring, CSS Custom Highlight painting, pins and
+ * hit testing. It talks to the plugin runtime in the parent over `postMessage`,
+ * so the persisted annotation model and the composer stay exactly where they are.
+ *
+ * Isolation is preserved: the iframe keeps an opaque origin and script
+ * permission only. The parent never touches the frame document.
+ */
+
+/** Message namespace for the parent/frame bridge. */
+const ANNO_HTML_NS = 'dsh-annotation-html';
+
+/** Document implementation identity, also the keyed body slot key. */
+const ANNO_HTML_BODY_ID = '@fanfan4589/dsh-annotation/html';
+
+/** File suffixes this renderer claims. */
+const ANNO_HTML_EXTENSIONS = ['html', 'htm'];
+
+/** Attribute every annotation-owned node carries, so text extraction skips it. */
+const ANNO_HTML_UI_ATTR = 'data-dsh-anno-ui';
+
+/** Asset packing limits mirror the shipped implementer's budgets. */
+const ANNO_HTML_MAX_ASSET_BYTES = 4 * 1024 * 1024;
+const ANNO_HTML_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
+const ANNO_HTML_MAX_ASSETS = 64;
+
+/** Decode complete HTML bytes; invalid UTF-8 throws. */
+function annoHtmlDecode(data) {
+  return new TextDecoder('utf-8', { fatal: true }).decode(data);
+}
+
+/** Encode binary asset bytes as base64 without a call-stack blow-up. */
+function annoHtmlBase64(bytes) {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(index, index + chunk));
+  }
+  return btoa(binary);
+}
+
+/** Whether a reference addresses a sibling file this renderer may read. */
+function annoHtmlRelativeReference(reference) {
+  return (
+    typeof reference === 'string' &&
+    reference.length > 0 &&
+    !/^(?:[a-z][a-z\d+.-]*:|[/\\#?])/iu.test(reference) &&
+    !reference.includes('\u0000')
+  );
+}
+
+/**
+ * Decode a `dsh-resource://file/session/<id>/<path>` address into the session
+ * an asset read runs under and the document's own path.
+ * @param {string} address resource address
+ * @returns {{sessionId: string, path: string} | null}
+ */
+function annoHtmlFileScope(address) {
+  if (typeof address !== 'string' || !address.startsWith('dsh-resource://file/')) return null;
+  try {
+    const end = address.search(/[?#]/);
+    const raw = address.slice('dsh-resource://file/'.length, end === -1 ? undefined : end);
+    const parts = raw.split('/');
+    const scope = parts.shift();
+    if (scope === 'session') {
+      const sessionId = parts.shift();
+      if (!sessionId || parts.length === 0) return null;
+      const path = parts.map(decodeURIComponent).join('/');
+      if (path === '') return null;
+      return { sessionId: decodeURIComponent(sessionId), path };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Append the bridge to a complete document.
+ * @param {string} html complete HTML text
+ * @returns {string}
+ */
+function annoHtmlAppendBridge(html) {
+  return String(html) + annoHtmlBridgeScript();
+}
+
+/**
+ * Inline the document's classic scripts and stylesheets as data URLs and append
+ * the bridge. Reads go through the runtime's bound workspace-file face; a
+ * reference that cannot be read is left untouched so the page still renders.
+ * @param {string} source complete HTML text
+ * @param {{sessionId: string, path: string} | null} scope document scope
+ * @param {object | null} runtime plugin runtime
+ * @param {AbortSignal} signal cancellation
+ * @returns {Promise<string>} complete document for the iframe
+ */
+async function annoHtmlPrepare(source, scope, runtime, signal) {
+  if (!runtime || typeof runtime.readHtmlAsset !== 'function' || !scope || scope.sessionId === '') {
+    return annoHtmlAppendBridge(source);
+  }
+  let doc = null;
+  try {
+    doc = new DOMParser().parseFromString(source, 'text/html');
+  } catch {
+    return annoHtmlAppendBridge(source);
+  }
+  if (!doc || !doc.documentElement) return annoHtmlAppendBridge(source);
+  // A base element moves resolution into the browser; do not second-guess it.
+  if (doc.querySelector('base[href]') !== null) return annoHtmlAppendBridge(source);
+
+  const items = [];
+  for (const element of doc.querySelectorAll('script[src],link[href]')) {
+    const script = element.localName === 'script';
+    if (script) {
+      const type = (element.getAttribute('type') || '').trim().toLowerCase();
+      if (['', 'text/javascript', 'application/javascript'].includes(type) === false) continue;
+    } else {
+      const rel = (element.getAttribute('rel') || '').toLowerCase().split(/\s+/);
+      if (rel.includes('stylesheet') === false) continue;
+    }
+    const reference = element.getAttribute(script ? 'src' : 'href');
+    if (typeof reference !== 'string' || annoHtmlRelativeReference(reference) === false) continue;
+    const pathPart = reference.split(/[?#]/)[0];
+    if ((script ? /\.js$/iu : /\.css$/iu).test(pathPart) === false) continue;
+    items.push({ element, script, reference });
+  }
+  if (items.length === 0) return annoHtmlAppendBridge(source);
+
+  const seen = new Set();
+  let total = source.length;
+  let count = 0;
+  for (const item of items) {
+    if (signal && signal.aborted) throw new Error('annotation html pack aborted');
+    if (count >= ANNO_HTML_MAX_ASSETS || total >= ANNO_HTML_MAX_TOTAL_BYTES) break;
+    const key = (item.script ? 'script:' : 'style:') + item.reference;
+    if (seen.has(key)) continue;
+    const asset = await runtime.readHtmlAsset(scope.sessionId, item.reference, scope.path, signal);
+    if (!asset || !asset.data) continue;
+    const size = typeof asset.data.byteLength === 'number' ? asset.data.byteLength : 0;
+    if (size === 0 || size > ANNO_HTML_MAX_ASSET_BYTES) continue;
+    if (total + size > ANNO_HTML_MAX_TOTAL_BYTES) break;
+    total += size;
+    seen.add(key);
+    count += 1;
+    const mime = item.script ? 'text/javascript' : 'text/css';
+    item.element.setAttribute(
+      item.script ? 'src' : 'href',
+      'data:' + mime + ';base64,' + annoHtmlBase64(asset.data),
+    );
+  }
+  return annoHtmlAppendBridge('<!doctype html>' + doc.documentElement.outerHTML);
+}
+
+/**
+ * The in-frame half. This function is serialized into the iframe document, so it
+ * must be self-contained: no outer bindings, no imports, plain browser APIs only.
+ * @param {{ns: string, colors: string[], uiAttr: string}} config bridge configuration
+ */
+function annoHtmlBridgeMain(config) {
+  var cfg = config || {};
+  var NS = cfg.ns || 'dsh-annotation-html';
+  var UI = cfg.uiAttr || 'data-dsh-anno-ui';
+  var COLORS = Array.isArray(cfg.colors) ? cfg.colors : ['yellow'];
+  var COLOR_CSS = {
+    yellow: 'rgba(250, 204, 21, 0.42)',
+    green: 'rgba(74, 222, 128, 0.40)',
+    blue: 'rgba(96, 165, 250, 0.38)',
+    pink: 'rgba(244, 114, 182, 0.35)',
+  };
+  var HIGHLIGHT_PREFIX = 'dsh-anno-';
+  var FLASH_NAME = 'dsh-anno-flash';
+  var MAX_TEXT = 400000;
+  var MAX_QUOTE = 4000;
+  var CONTEXT = 42;
+  var SKIP_TAGS = {
+    SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1, IFRAME: 1, CANVAS: 1,
+    SVG: 1, TEXTAREA: 1, INPUT: 1, SELECT: 1, BUTTON: 1,
+  };
+
+  var pinsRoot = null;
+  var pinEls = {};
+  var rangesById = {};
+  var annotationsById = {};
+  var currentList = null;
+  var lastReportKey = '';
+  var lastReportAt = 0;
+  var pointerDown = false;
+  var selectionTimer = 0;
+  var lastPointerUpAt = 0;
+  var repaintTimer = 0;
+  var scrollFrame = 0;
+
+  function post(message) {
+    try {
+      if (!message || typeof message !== 'object') return;
+      message.ns = NS;
+      if (window.parent && window.parent !== window) window.parent.postMessage(message, '*');
+    } catch (error) {
+      /* the parent may be gone */
+    }
+  }
+
+  function clampText(value, max) {
+    if (typeof value !== 'string') return '';
+    var clean = value.replace(/\u0000/g, '');
+    return clean.length > max ? clean.slice(0, max) : clean;
+  }
+
+  function makeHiddenTest() {
+    var cache = typeof WeakMap === 'function' ? new WeakMap() : null;
+    function check(element) {
+      if (!element || element.nodeType !== 1) return false;
+      if (cache && cache.has(element)) return cache.get(element);
+      var hidden = false;
+      if (typeof element.hasAttribute === 'function' && element.hasAttribute(UI)) hidden = true;
+      else if (SKIP_TAGS[element.tagName]) hidden = true;
+      else if (element.hidden) hidden = true;
+      else {
+        try {
+          if (typeof element.checkVisibility === 'function') {
+            hidden = !element.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true });
+          } else {
+            var style = window.getComputedStyle(element);
+            hidden = style.display === 'none' || style.visibility === 'hidden';
+          }
+        } catch (error) {
+          hidden = false;
+        }
+      }
+      if (!hidden) hidden = check(element.parentElement);
+      if (cache) cache.set(element, hidden);
+      return hidden;
+    }
+    return check;
+  }
+
+  function collectTextNodes(root) {
+    var hidden = makeHiddenTest();
+    var nodes = [];
+    var text = '';
+    if (!root) return { text: text, nodes: nodes };
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    while (walker.nextNode()) {
+      var node = walker.currentNode;
+      var parent = node.parentElement;
+      if (!parent || hidden(parent)) continue;
+      var value = node.data;
+      if (!value) continue;
+      var start = text.length;
+      text += value;
+      nodes.push({ node: node, start: start, end: text.length });
+      if (text.length >= MAX_TEXT) break;
+    }
+    return { text: text, nodes: nodes };
+  }
+
+  function offsetInNodes(collected, container, offset) {
+    if (container.nodeType === 3) {
+      for (var index = 0; index < collected.nodes.length; index += 1) {
+        var item = collected.nodes[index];
+        if (item.node === container) return item.start + Math.min(offset, container.data.length);
+      }
+      return null;
+    }
+    if (collected.nodes.length === 0) return 0;
+    var probe = document.createRange();
+    try {
+      probe.setStart(container, offset);
+      probe.collapse(true);
+    } catch (error) {
+      return null;
+    }
+    for (var position = 0; position < collected.nodes.length; position += 1) {
+      var relation;
+      try {
+        relation = probe.comparePoint(collected.nodes[position].node, 0);
+      } catch (error) {
+        relation = 1;
+      }
+      if (relation >= 0) return collected.nodes[position].start;
+    }
+    return collected.nodes[collected.nodes.length - 1].end;
+  }
+
+  function rangeFromOffsets(nodes, start, end) {
+    if (!Array.isArray(nodes) || end <= start) return null;
+    var startNode = null;
+    var startOffset = 0;
+    var endNode = null;
+    var endOffset = 0;
+    for (var index = 0; index < nodes.length; index += 1) {
+      var item = nodes[index];
+      if (startNode === null && start < item.end) {
+        startNode = item.node;
+        startOffset = Math.max(0, start - item.start);
+      }
+      if (startNode !== null && end <= item.end) {
+        endNode = item.node;
+        endOffset = Math.max(0, end - item.start);
+        break;
+      }
+    }
+    if (startNode === null || endNode === null) return null;
+    var range = document.createRange();
+    try {
+      range.setStart(startNode, Math.min(startOffset, startNode.data.length));
+      range.setEnd(endNode, Math.min(endOffset, endNode.data.length));
+    } catch (error) {
+      return null;
+    }
+    return range.collapsed ? null : range;
+  }
+
+  function clipRange(range, root) {
+    if (!range || !root) return null;
+    var bounds = document.createRange();
+    try {
+      bounds.selectNodeContents(root);
+    } catch (error) {
+      return null;
+    }
+    var clipped = range.cloneRange();
+    try {
+      if (clipped.compareBoundaryPoints(Range.START_TO_START, bounds) < 0) {
+        clipped.setStart(bounds.startContainer, bounds.startOffset);
+      }
+      if (clipped.compareBoundaryPoints(Range.END_TO_END, bounds) > 0) {
+        clipped.setEnd(bounds.endContainer, bounds.endOffset);
+      }
+    } catch (error) {
+      return null;
+    }
+    return clipped.collapsed ? null : clipped;
+  }
+
+  function buildSegment(text, start, end) {
+    if (typeof text !== 'string') return null;
+    if (typeof start !== 'number' || typeof end !== 'number') return null;
+    if (start < 0 || end <= start || end > text.length) return null;
+    var raw = text.slice(start, end);
+    if (raw.trim() === '') return null;
+    return {
+      exact: clampText(raw, MAX_QUOTE),
+      prefix: text.slice(Math.max(0, start - CONTEXT), start),
+      suffix: text.slice(end, end + CONTEXT),
+      start: start,
+    };
+  }
+
+  function commonPrefixLen(left, right) {
+    var limit = Math.min(left.length, right.length);
+    var index = 0;
+    while (index < limit && left.charCodeAt(index) === right.charCodeAt(index)) index += 1;
+    return index;
+  }
+
+  function commonSuffixLen(left, right) {
+    var limit = Math.min(left.length, right.length);
+    var index = 0;
+    while (index < limit && left.charCodeAt(left.length - 1 - index) === right.charCodeAt(right.length - 1 - index)) {
+      index += 1;
+    }
+    return index;
+  }
+
+  function resolveSegment(text, segment) {
+    if (typeof text !== 'string' || !segment || typeof segment.exact !== 'string' || segment.exact === '') return null;
+    var exact = segment.exact;
+    var prefix = typeof segment.prefix === 'string' ? segment.prefix : '';
+    var suffix = typeof segment.suffix === 'string' ? segment.suffix : '';
+    var hint = typeof segment.start === 'number' && segment.start >= 0 ? segment.start : -1;
+    var best = null;
+    var from = 0;
+    var seen = 0;
+    while (seen < 200) {
+      var index = text.indexOf(exact, from);
+      if (index < 0) break;
+      seen += 1;
+      var before = text.slice(Math.max(0, index - prefix.length), index);
+      var after = text.slice(index + exact.length, index + exact.length + suffix.length);
+      var score = commonSuffixLen(prefix, before) + commonPrefixLen(suffix, after);
+      if (index === hint) score += 0.5;
+      if (best === null || score > best.score) best = { start: index, end: index + exact.length, score: score };
+      from = index + Math.max(1, exact.length);
+    }
+    return best === null ? null : { start: best.start, end: best.end };
+  }
+
+  function rangeRect(range) {
+    var rects = null;
+    try {
+      rects = range.getClientRects();
+    } catch (error) {
+      return null;
+    }
+    for (var index = rects.length - 1; index >= 0; index -= 1) {
+      var rect = rects[index];
+      if (rect.width > 0 || rect.height > 0) {
+        return {
+          left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+          width: rect.width, height: rect.height,
+        };
+      }
+    }
+    return null;
+  }
+
+  function highlightSupported() {
+    return typeof CSS !== 'undefined' && CSS !== null && !!CSS.highlights && typeof Highlight === 'function';
+  }
+
+  function ensureStyle() {
+    if (document.querySelector('style[' + UI + ']') !== null) return;
+    var style = document.createElement('style');
+    style.setAttribute(UI, '');
+    var rules = '';
+    for (var index = 0; index < COLORS.length; index += 1) {
+      var color = COLORS[index];
+      rules += '::highlight(' + HIGHLIGHT_PREFIX + color + '){background-color:' + (COLOR_CSS[color] || COLOR_CSS.yellow) + ';}\n';
+    }
+    rules += '::highlight(' + FLASH_NAME + '){background-color:rgba(59,130,246,0.45);}\n';
+    rules +=
+      '[' + UI + ']{pointer-events:none;}\n' +
+      '.dsh-anno-pin{position:fixed;z-index:2147483000;box-sizing:border-box;width:18px;height:18px;' +
+      'border-radius:9px;border:1px solid rgba(0,0,0,0.28);background:#facc15;color:#111;' +
+      "font:600 11px/16px system-ui,-apple-system,'Segoe UI',sans-serif;text-align:center;" +
+      'box-shadow:0 1px 3px rgba(0,0,0,0.28);cursor:pointer;pointer-events:auto;user-select:none;}\n' +
+      '.dsh-anno-pin[data-sent="1"]{opacity:.55;}\n' +
+      '.dsh-anno-pin:hover{transform:scale(1.12);}\n';
+    style.textContent = rules;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function ensurePinsRoot() {
+    if (pinsRoot !== null && pinsRoot.isConnected) return pinsRoot;
+    pinsRoot = document.createElement('div');
+    pinsRoot.setAttribute(UI, '');
+    pinsRoot.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:2147483000;';
+    (document.body || document.documentElement).appendChild(pinsRoot);
+    pinEls = {};
+    return pinsRoot;
+  }
+
+  function positionPin(element, id) {
+    var ranges = rangesById[id];
+    if (!ranges || ranges.length === 0) {
+      element.style.display = 'none';
+      return;
+    }
+    var rect = rangeRect(ranges[0]);
+    if (!rect) {
+      element.style.display = 'none';
+      return;
+    }
+    var left = Math.min(rect.right + 6, (window.innerWidth || 800) - 24);
+    var top = rect.top + rect.height / 2 - 9;
+    element.__annoRect = {
+      left: left, top: top, right: left + 18, bottom: top + 18, width: 18, height: 18,
+    };
+    element.style.left = Math.round(left) + 'px';
+    element.style.top = Math.round(top) + 'px';
+    element.style.visibility = top < -20 || top > (window.innerHeight || 600) + 20 ? 'hidden' : 'visible';
+  }
+
+  function onPinClick(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    var target = event.currentTarget;
+    var id = target.getAttribute('data-annotation-id');
+    if (id) post({ type: 'hit', id: id, rect: target.__annoRect || null });
+  }
+
+  function renderPins() {
+    var root = ensurePinsRoot();
+    var wanted = {};
+    for (var id in rangesById) {
+      if (!Object.prototype.hasOwnProperty.call(rangesById, id)) continue;
+      wanted[id] = true;
+      var ann = annotationsById[id] || {};
+      var element = pinEls[id];
+      if (!element) {
+        element = document.createElement('div');
+        element.className = 'dsh-anno-pin';
+        element.setAttribute(UI, '');
+        element.setAttribute('data-dsh-anno-pin', '');
+        element.addEventListener('click', onPinClick, true);
+        root.appendChild(element);
+        pinEls[id] = element;
+      }
+      element.setAttribute('data-annotation-id', id);
+      element.textContent = ann.number ? String(ann.number) : '';
+      element.style.display = ann.number ? 'block' : 'none';
+      element.setAttribute('data-sent', ann.sent ? '1' : '0');
+      positionPin(element, id);
+    }
+    for (var existing in pinEls) {
+      if (!Object.prototype.hasOwnProperty.call(pinEls, existing)) continue;
+      if (!wanted[existing]) {
+        var node = pinEls[existing];
+        if (node.parentNode) node.parentNode.removeChild(node);
+        delete pinEls[existing];
+      }
+    }
+  }
+
+  function repositionPins() {
+    for (var id in pinEls) {
+      if (Object.prototype.hasOwnProperty.call(pinEls, id)) positionPin(pinEls[id], id);
+    }
+  }
+
+  function scheduleReposition() {
+    if (scrollFrame) return;
+    scrollFrame = window.requestAnimationFrame(function () {
+      scrollFrame = 0;
+      repositionPins();
+    });
+  }
+
+  function applyPaint(list) {
+    var items = Array.isArray(list) ? list : [];
+    currentList = items;
+    var root = document.body || document.documentElement;
+    var collected = collectTextNodes(root);
+    rangesById = {};
+    annotationsById = {};
+    var byColor = {};
+    for (var colorIndex = 0; colorIndex < COLORS.length; colorIndex += 1) byColor[COLORS[colorIndex]] = [];
+    for (var index = 0; index < items.length; index += 1) {
+      var ann = items[index];
+      if (!ann || typeof ann.id !== 'string') continue;
+      annotationsById[ann.id] = ann;
+      var ranges = [];
+      var segments = Array.isArray(ann.segments) ? ann.segments : [];
+      for (var segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
+        var resolved = resolveSegment(collected.text, segments[segmentIndex]);
+        if (resolved === null) continue;
+        var range = rangeFromOffsets(collected.nodes, resolved.start, resolved.end);
+        if (range !== null) ranges.push(range);
+      }
+      if (ranges.length === 0) continue;
+      rangesById[ann.id] = ranges;
+      var bucket = byColor[ann.color];
+      if (bucket) {
+        for (var rangeIndex = 0; rangeIndex < ranges.length; rangeIndex += 1) bucket.push(ranges[rangeIndex]);
+      }
+    }
+    if (highlightSupported()) {
+      for (var paintIndex = 0; paintIndex < COLORS.length; paintIndex += 1) {
+        var color = COLORS[paintIndex];
+        var name = HIGHLIGHT_PREFIX + color;
+        var rangesForColor = byColor[color] || [];
+        try {
+          if (rangesForColor.length === 0) {
+            CSS.highlights.delete(name);
+          } else {
+            var highlight = new Highlight();
+            for (var rangeIndex = 0; rangeIndex < rangesForColor.length && rangeIndex < 2000; rangeIndex += 1) {
+              highlight.add(rangesForColor[rangeIndex]);
+            }
+            CSS.highlights.set(name, highlight);
+          }
+        } catch (error) {
+          try {
+            CSS.highlights.delete(name);
+          } catch (ignored) {
+            /* nothing to clear */
+          }
+        }
+      }
+    }
+    renderPins();
+  }
+
+  function flash(ranges) {
+    if (highlightSupported() === false || !ranges || ranges.length === 0) return;
+    try {
+      var highlight = new Highlight();
+      for (var index = 0; index < ranges.length && index < 50; index += 1) highlight.add(ranges[index]);
+      CSS.highlights.set(FLASH_NAME, highlight);
+    } catch (error) {
+      return;
+    }
+    if (flash.timer) window.clearTimeout(flash.timer);
+    flash.timer = window.setTimeout(function () {
+      try {
+        CSS.highlights.delete(FLASH_NAME);
+      } catch (error) {
+        /* already gone */
+      }
+    }, 1600);
+  }
+
+  function reveal(id) {
+    var ranges = rangesById[id];
+    if (!ranges || ranges.length === 0) return;
+    var first = ranges[0];
+    var element = first.startContainer && first.startContainer.parentElement;
+    if (element) {
+      try {
+        element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+      } catch (error) {
+        /* options bag unsupported */
+      }
+    }
+    flash(ranges);
+    window.setTimeout(repositionPins, 80);
+    window.setTimeout(repositionPins, 600);
+  }
+
+  function hitTest(clientX, clientY) {
+    var caret = null;
+    try {
+      if (typeof document.caretRangeFromPoint === 'function') {
+        caret = document.caretRangeFromPoint(clientX, clientY);
+      } else if (typeof document.caretPositionFromPoint === 'function') {
+        var position = document.caretPositionFromPoint(clientX, clientY);
+        if (position) {
+          caret = document.createRange();
+          caret.setStart(position.offsetNode, position.offset);
+          caret.collapse(true);
+        }
+      }
+    } catch (error) {
+      caret = null;
+    }
+    if (!caret) return null;
+    var container = caret.startContainer;
+    var offset = caret.startOffset;
+    for (var id in rangesById) {
+      if (!Object.prototype.hasOwnProperty.call(rangesById, id)) continue;
+      var ranges = rangesById[id];
+      for (var index = 0; index < ranges.length; index += 1) {
+        var inside = false;
+        try {
+          inside = ranges[index].comparePoint(container, offset) === 0;
+        } catch (error) {
+          inside = false;
+        }
+        if (inside) return { id: id, rect: rangeRect(ranges[index]) };
+      }
+    }
+    return null;
+  }
+
+  function captureSelection() {
+    var selection = null;
+    try {
+      selection = window.getSelection();
+    } catch (error) {
+      return null;
+    }
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+    var range = selection.getRangeAt(0);
+    var root = document.body || document.documentElement;
+    var clipped = clipRange(range, root);
+    if (clipped === null) return null;
+    var collected = collectTextNodes(root);
+    var start = offsetInNodes(collected, clipped.startContainer, clipped.startOffset);
+    var end = offsetInNodes(collected, clipped.endContainer, clipped.endOffset);
+    var segment = null;
+    if (start !== null && end !== null && end > start) segment = buildSegment(collected.text, start, end);
+    if (segment === null) {
+      var raw = '';
+      try {
+        raw = clipped.toString();
+      } catch (error) {
+        raw = '';
+      }
+      if (raw.trim() !== '') segment = { exact: clampText(raw, MAX_QUOTE), prefix: '', suffix: '', start: 0 };
+    }
+    if (segment === null) return null;
+    var rect = rangeRect(clipped);
+    if (rect === null) return null;
+    return { segment: segment, rect: rect, text: segment.exact };
+  }
+
+  function reportSelection() {
+    if (pointerDown) return;
+    var payload = captureSelection();
+    if (payload === null) return;
+    var key = payload.segment.exact.slice(0, 80) + '|' + Math.round(payload.rect.left) + ',' + Math.round(payload.rect.top);
+    var now = Date.now();
+    if (key === lastReportKey && now - lastReportAt < 1200) return;
+    lastReportKey = key;
+    lastReportAt = now;
+    post({ type: 'selection', segment: payload.segment, rect: payload.rect, text: payload.text });
+  }
+
+  function isOwnUi(target) {
+    return !!target && typeof target.closest === 'function' && target.closest('[' + UI + ']') !== null;
+  }
+
+  function onPointerDown(event) {
+    pointerDown = true;
+    if (isOwnUi(event.target)) return;
+    post({ type: 'dismiss' });
+  }
+
+  function onPointerUp(event) {
+    pointerDown = false;
+    lastPointerUpAt = Date.now();
+    if (isOwnUi(event.target)) return;
+    var clientX = event.clientX;
+    var clientY = event.clientY;
+    window.setTimeout(function () {
+      var payload = captureSelection();
+      if (payload !== null) {
+        reportSelection();
+        return;
+      }
+      var hit = hitTest(clientX, clientY);
+      if (hit && hit.rect) post({ type: 'hit', id: hit.id, rect: hit.rect });
+    }, 0);
+  }
+
+  function onMouseUp(event) {
+    if (Date.now() - lastPointerUpAt < 400) return;
+    onPointerUp(event);
+  }
+
+  function onKeyDown(event) {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key === 'Escape') {
+      post({ type: 'dismiss' });
+      return;
+    }
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) post({ type: 'send' });
+  }
+
+  function onKeyUp(event) {
+    if (event.key === 'Escape') {
+      post({ type: 'dismiss' });
+      return;
+    }
+    var selectionKey = event.shiftKey || ((event.metaKey || event.ctrlKey) && (event.key === 'a' || event.key === 'A'));
+    if (!selectionKey) return;
+    window.setTimeout(reportSelection, 0);
+  }
+
+  function onSelectionChange() {
+    if (pointerDown) return;
+    var selection = null;
+    try {
+      selection = window.getSelection();
+    } catch (error) {
+      return;
+    }
+    if (!selection || selection.isCollapsed) return;
+    if (selectionTimer) window.clearTimeout(selectionTimer);
+    selectionTimer = window.setTimeout(function () {
+      selectionTimer = 0;
+      reportSelection();
+    }, 450);
+  }
+
+  function onScroll() {
+    scheduleReposition();
+  }
+
+  function onMessage(event) {
+    if (event.source !== window.parent) return;
+    var data = event.data;
+    if (!data || data.ns !== NS) return;
+    if (data.type === 'paint') {
+      applyPaint(data.annotations);
+      return;
+    }
+    if (data.type === 'reveal' && typeof data.id === 'string') reveal(data.id);
+    if (data.type === 'clear') {
+      lastReportKey = '';
+      try {
+        var selection = window.getSelection();
+        if (selection) selection.removeAllRanges();
+      } catch (error) {
+        /* a frame without a selection */
+      }
+    }
+  }
+
+  function announce() {
+    ensureStyle();
+    if (!pinsRoot || !pinsRoot.isConnected) {
+      pinsRoot = null;
+      pinEls = {};
+    }
+    if (currentList !== null) applyPaint(currentList);
+    post({ type: 'ready' });
+  }
+
+  ensureStyle();
+  document.addEventListener('pointerdown', onPointerDown, true);
+  document.addEventListener('pointerup', onPointerUp, true);
+  document.addEventListener('mousedown', onPointerDown, true);
+  document.addEventListener('mouseup', onMouseUp, true);
+  document.addEventListener('keydown', onKeyDown, true);
+  document.addEventListener('keyup', onKeyUp, true);
+  document.addEventListener('selectionchange', onSelectionChange, false);
+  window.addEventListener('message', onMessage, false);
+  window.addEventListener('scroll', onScroll, true);
+  window.addEventListener('resize', onScroll, false);
+  window.addEventListener('load', announce, false);
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', announce, false);
+  else announce();
+
+  // Pages that fill themselves in after load get their stored quotes re-resolved;
+  // annotation-owned nodes are skipped so our own pins never wake the observer.
+  try {
+    var observer = new MutationObserver(function (mutations) {
+      if (currentList === null) return;
+      var relevant = false;
+      for (var index = 0; index < mutations.length; index += 1) {
+        var target = mutations[index].target;
+        if (pinsRoot && target && (target === pinsRoot || pinsRoot.contains(target))) continue;
+        relevant = true;
+        break;
+      }
+      if (!relevant) return;
+      if (repaintTimer) window.clearTimeout(repaintTimer);
+      repaintTimer = window.setTimeout(function () {
+        repaintTimer = 0;
+        applyPaint(currentList);
+      }, 350);
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  } catch (error) {
+    /* mutation observation is an enhancement */
+  }
+}
+
+/** The palette, shared with the bundle's core when it is present. */
+function annoHtmlPalette() {
+  return typeof ANNO_COLORS !== 'undefined' && Array.isArray(ANNO_COLORS)
+    ? ANNO_COLORS
+    : ['yellow', 'green', 'blue', 'pink'];
+}
+
+/** Serialized bridge for one iframe document. */
+function annoHtmlBridgeScript() {
+  const config = JSON.stringify({ ns: ANNO_HTML_NS, colors: annoHtmlPalette(), uiAttr: ANNO_HTML_UI_ATTR })
+    .replace(/</g, '\\u003c');
+  return '<script>(' + annoHtmlBridgeMain.toString() + ')(' + config + ');</script>';
+}
+
+/**
+ * The document body rendered under `sidebar.right.tab.document` for the
+ * annotation implementation. It builds the frame's document in the parent
+ * (asset reads happen under the file's own authority), keeps the opaque
+ * sandbox, and registers the frame so the runtime can talk to its bridge.
+ * @param {object} props slot props plus the injected runtime
+ */
+function AnnoHtmlBody(props) {
+  const runtime = props.runtime || null;
+  const content = props.content || null;
+  const address = typeof props.resourceAddress === 'string' ? props.resourceAddress : '';
+  const t = typeof props.t === 'function' ? props.t : (key) => String(key);
+  const state = React.useState({ html: '', status: 'loading' });
+  const view = state[0];
+  const setView = state[1];
+  const frameRef = React.useRef(null);
+  const entryRef = React.useRef(null);
+
+  const unregister = () => {
+    if (entryRef.current && typeof entryRef.current === 'function') {
+      try {
+        entryRef.current();
+      } catch {
+        /* already gone */
+      }
+    }
+    entryRef.current = null;
+  };
+
+  const bindFrame = React.useCallback((iframe) => {
+    frameRef.current = iframe;
+    unregister();
+    if (!iframe || !runtime || typeof runtime.registerHtmlFrame !== 'function') return;
+    const scope = annoHtmlFileScope(address);
+    entryRef.current = runtime.registerHtmlFrame({
+      iframe,
+      docKey: address,
+      path: scope ? scope.path : '',
+    });
+    iframe.setAttribute('data-dsh-anno-html-frame', '');
+  }, [runtime, address]);
+
+  React.useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    if (!content || content.kind !== 'bytes' || !content.data) {
+      setView({ html: '', status: 'unsupported' });
+      return () => controller.abort();
+    }
+    let source = '';
+    try {
+      source = annoHtmlDecode(content.data);
+    } catch {
+      setView({ html: '', status: 'failed' });
+      return () => controller.abort();
+    }
+    setView({ html: '', status: 'loading' });
+    const scope = annoHtmlFileScope(address);
+    Promise.resolve()
+      .then(() => annoHtmlPrepare(source, scope, runtime, controller.signal))
+      .then((html) => {
+        if (active && !controller.signal.aborted) setView({ html, status: 'ready' });
+      })
+      .catch(() => {
+        if (active && !controller.signal.aborted) setView({ html: '', status: 'failed' });
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [content, address, runtime]);
+
+  React.useEffect(() => () => unregister(), []);
+
+  if (view.status === 'unsupported') return null;
+  if (view.status === 'failed') {
+    return h('p', {
+      className: 'anno-html-status',
+      role: 'alert',
+      style: { margin: 0, padding: '10px', color: 'var(--dsw-alias-label-secondary)', fontSize: '13px', whiteSpace: 'normal' },
+    }, t('html.failed'));
+  }
+  if (view.status !== 'ready') {
+    return h('p', {
+      className: 'anno-html-status',
+      style: { margin: 0, padding: '10px', color: 'var(--dsw-alias-label-secondary)', fontSize: '13px', whiteSpace: 'normal' },
+    }, t('html.loading'));
+  }
+  return h('iframe', {
+    ref: bindFrame,
+    className: 'anno-html-frame',
+    sandbox: 'allow-scripts',
+    srcDoc: view.html,
+    title: t('html.frame'),
+    onLoad: () => {
+      if (runtime && typeof runtime.repaint === 'function') runtime.repaint();
+    },
+    style: {
+      display: 'block',
+      width: '100%',
+      height: '100%',
+      minHeight: '240px',
+      border: 'none',
+      background: 'var(--dsw-alias-bg-base, #fff)',
+    },
+  });
 }
 
 /* ---- src/engine.js ---- */
@@ -1187,6 +2162,151 @@ function annoDocMatches(annotation, info) {
   return annoPathIsAbsolute(annotation.path) && annotation.path === info.path;
 }
 
+/** Frames registered by the annotatable HTML renderer, in mount order. */
+function annoHtmlFrames(runtime) {
+  if (!Array.isArray(runtime.htmlFrames)) runtime.htmlFrames = [];
+  return runtime.htmlFrames;
+}
+
+/** The registered HTML frame a window message came from. */
+function annoHtmlFrameForSource(runtime, source) {
+  if (!source) return null;
+  for (const entry of annoHtmlFrames(runtime)) {
+    try {
+      if (entry.iframe && entry.iframe.contentWindow === source) return entry;
+    } catch {
+      /* detached frame */
+    }
+  }
+  return null;
+}
+
+/** Post one bridge message into a frame; false when the frame is gone. */
+function annoHtmlPost(entry, message) {
+  let target = null;
+  try {
+    target = entry && entry.iframe ? entry.iframe.contentWindow : null;
+  } catch {
+    target = null;
+  }
+  if (!target) return false;
+  try {
+    target.postMessage({ ...message, ns: ANNO_HTML_NS }, '*');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Iframe box in the parent viewport. */
+function annoHtmlFrameBox(entry) {
+  try {
+    return entry && entry.iframe ? entry.iframe.getBoundingClientRect() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Translate a frame-internal rect into parent viewport coordinates. */
+function annoHtmlViewportRect(entry, rect) {
+  if (!rect || typeof rect !== 'object') return null;
+  const box = annoHtmlFrameBox(entry);
+  if (!box) return null;
+  const left = box.left + (Number(rect.left) || 0);
+  const top = box.top + (Number(rect.top) || 0);
+  const width = Number(rect.width) || 0;
+  const height = Number(rect.height) || 0;
+  return { left, top, right: left + width, bottom: top + height, width, height };
+}
+
+/** Observe the interactive-preview preference; null when the settings face is not mounted yet. */
+function annoWatchDeveloperTools(runtime, listener) {
+  try {
+    const forms = runtime.ctx.get('configForms');
+    const preference = forms && forms.developerTools;
+    const enabled = preference && preference.enabled;
+    if (enabled && typeof enabled.subscribe === 'function') return enabled.subscribe(listener);
+  } catch {
+    /* the settings service may not be mounted */
+  }
+  return null;
+}
+
+/** Whether the host runs the interactive HTML preview (arbitrary scripts); null while unavailable. */
+function annoHtmlDeveloperToolsEnabled(ctx) {
+  try {
+    const forms = ctx.get('configForms');
+    const preference = forms && forms.developerTools;
+    if (!preference) return null;
+    const enabled = preference.enabled;
+    if (typeof enabled === 'boolean') return enabled;
+    if (enabled && typeof enabled.getSnapshot === 'function') return enabled.getSnapshot() === true;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** The workspace-file read face, resolved lazily and cached only once found. */
+function annoWorkspaceFiles(runtime) {
+  if (runtime.workspaceFiles) return runtime.workspaceFiles;
+  const ctx = runtime.ctx;
+  if (!ctx || typeof ctx.get !== 'function') return null;
+  let files = null;
+  try {
+    const remote = ctx.get('remote');
+    if (remote && remote.workspaceFiles && typeof remote.workspaceFiles.readBytes === 'function') {
+      files = remote.workspaceFiles;
+    }
+  } catch {
+    files = null;
+  }
+  if (!files) {
+    try {
+      const direct = ctx.get('remote.workspaceFiles');
+      if (direct && typeof direct.readBytes === 'function') files = direct;
+    } catch {
+      files = null;
+    }
+  }
+  if (files) runtime.workspaceFiles = files;
+  return files;
+}
+
+/** Push the stored annotations of each live HTML frame into its bridge. */
+function annoPaintHtmlFrames(runtime, numbers) {
+  const frames = annoHtmlFrames(runtime);
+  if (frames.length === 0) return;
+  const list = runtime.store.list();
+  const numbering =
+    numbers ||
+    annoVisibleAnnotations(list, {
+      sessionId: runtime.state.currentSessionId,
+      openDocs: runtime.state.openDocs || [],
+    }).numbers;
+  for (const entry of frames) {
+    const annotations = [];
+    for (const annotation of list) {
+      if (!annoDocMatches(annotation, entry)) continue;
+      annotations.push({
+        id: annotation.id,
+        color: annotation.color,
+        number: numbering.get(annotation.id) || 0,
+        sent: annoIsSent(annotation),
+        segments: annotation.segments.map((segment) => ({
+          exact: segment.exact,
+          prefix: segment.prefix,
+          suffix: segment.suffix,
+          start: segment.start,
+        })),
+      });
+    }
+    const serial = JSON.stringify(annotations);
+    if (entry.lastPaint === serial) continue;
+    if (annoHtmlPost(entry, { type: 'paint', annotations })) entry.lastPaint = serial;
+  }
+}
+
 /** Describe the selection as a toolbar payload, or null when it is not annotatable. */
 function annoCaptureSelectionAttempt(runtime) {
   let selection;
@@ -1505,8 +2625,13 @@ function annoPaint(runtime) {
     loose: ANNO_PAINT_STATS.loose,
     unresolved: unresolved.slice(0, 8),
   };
+  const numbering = annoVisibleAnnotations(runtime.store.list(), {
+    sessionId: runtime.state.currentSessionId,
+    openDocs,
+  }).numbers;
   runtime.setOpenDocuments(openDocs);
-  annoUpdatePins(runtime);
+  annoUpdatePins(runtime, numbering);
+  annoPaintHtmlFrames(runtime, numbering);
   if (!annoSupportsHighlight()) return;
   for (const color of ANNO_COLORS) {
     const name = ANNO_HIGHLIGHT_PREFIX + color;
@@ -1524,14 +2649,18 @@ function annoPaint(runtime) {
 }
 
 /** Recompute the inline annotation pins from the painted ranges. */
-function annoUpdatePins(runtime) {
+function annoUpdatePins(runtime, numbering) {
   if (!runtime || document.visibilityState === 'hidden') return;
   if (!runtime.paintedRanges) return;
   const next = [];
-  const numbers = annoVisibleAnnotations(runtime.store.list(), {
-    sessionId: runtime.state.currentSessionId,
-  }).numbers;
+  const numbers =
+    numbering ||
+    annoVisibleAnnotations(runtime.store.list(), {
+      sessionId: runtime.state.currentSessionId,
+      openDocs: runtime.state.openDocs || [],
+    }).numbers;
   for (const annotation of runtime.store.list()) {
+    if (annoIsSent(annotation)) continue;
     const ranges = runtime.paintedRanges.get(annotation.id);
     if (!ranges || ranges.length === 0) continue;
     let rect = null;
@@ -1701,6 +2830,11 @@ function annoCreateRuntime(ctx) {
   const runtime = {
     ctx: ctx || null,
     sidebarRight: undefined,
+    workspaceFiles: undefined,
+    htmlFrames: [],
+    htmlPreview: null,
+    htmlPreviewRegistered: false,
+    htmlPreviewAttempts: 0,
     store: annoCreateStore(annoLocalStorage()),
     state: {
       version: 0,
@@ -1715,8 +2849,6 @@ function annoCreateRuntime(ctx) {
     },
     paintedRanges: new Map(),
     pruneSize: 0,
-    tabRegistered: false,
-    tabDispose: null,
     diag: {
       enabled: annoReadDebugFlag(),
       engineAttached: false,
@@ -1800,10 +2932,9 @@ function annoCreateRuntime(ctx) {
       Promise.resolve()
         .then(() => conversation.send(text))
         .then(() => {
-          runtime.store.markSent(ids);
+          runtime.store.removeMany(ids);
           runtime.repaint();
           runtime.setNotice('sent');
-          runtime.scheduleDocumentCleanup(ids);
         })
         .catch(() => runtime.setNotice('failed'));
       return true;
@@ -1873,6 +3004,9 @@ function annoCreateRuntime(ctx) {
       runtime.store.add(normalized);
       runtime.setToolbar(null);
       runtime.repaint();
+      for (const entry of annoHtmlFrames(runtime)) {
+        if (annoDocMatches(normalized, entry)) annoHtmlPost(entry, { type: 'clear' });
+      }
       try {
         const selection = window.getSelection();
         if (selection) selection.removeAllRanges();
@@ -1898,6 +3032,12 @@ function annoCreateRuntime(ctx) {
       runtime.repaint();
     },
     reveal(annotation) {
+      if (annotation && annotation.source === 'document') {
+        for (const entry of annoHtmlFrames(runtime)) {
+          if (!annoDocMatches(annotation, entry)) continue;
+          if (annoHtmlPost(entry, { type: 'reveal', id: annotation.id })) return true;
+        }
+      }
       const found = annoReveal(runtime, annotation);
       if (!found) runtime.setNotice('missing');
       return found;
@@ -1917,6 +3057,67 @@ function annoCreateRuntime(ctx) {
       } catch {
         return false;
       }
+    },
+    /**
+     * Read one sibling file under the document's own authority, for inlining a
+     * stylesheet or classic script. Failure is not fatal: the document renders
+     * with that reference untouched.
+     * @param {string} sessionId session the file address names
+     * @param {string} reference relative reference from the document
+     * @param {string} baseFile the document's own path
+     * @param {AbortSignal} [signal] cancellation
+     * @returns {Promise<{data: Uint8Array} | null>}
+     */
+    readHtmlAsset(sessionId, reference, baseFile, signal) {
+      const files = annoWorkspaceFiles(runtime);
+      if (!files || typeof files.readBytes !== 'function') return Promise.resolve(null);
+      if (typeof sessionId !== 'string' || sessionId === '') return Promise.resolve(null);
+      const clean = typeof reference === 'string' ? reference.split(/[?#]/)[0] : '';
+      if (clean === '' || /^(?:[a-z][a-z\d+.-]*:|\/|\\|#|\?)/iu.test(clean) || clean.includes('\u0000')) {
+        return Promise.resolve(null);
+      }
+      try {
+        return files
+          .readBytes(sessionId, clean, { baseFile }, signal)
+          .then((result) => {
+            if (!result || result.ok !== true) return null;
+            const value = result.value;
+            if (!value || !value.data) return null;
+            return value;
+          }, () => null);
+      } catch {
+        return Promise.resolve(null);
+      }
+    },
+    /**
+     * Register one mounted HTML frame's bridge window.
+     * @param {{iframe: HTMLIFrameElement, docKey: string, path?: string}} entry frame identity
+     * @returns disposer that unregisters it
+     */
+    registerHtmlFrame(entry) {
+      if (!entry || !entry.iframe) return () => {};
+      const record = {
+        iframe: entry.iframe,
+        docKey: typeof entry.docKey === 'string' ? entry.docKey : '',
+        path: typeof entry.path === 'string' ? entry.path : '',
+        ready: false,
+        lastPaint: '',
+        readyTimer: 0,
+      };
+      record.readyTimer = window.setTimeout(() => {
+        record.readyTimer = 0;
+        if (record.ready === true) return;
+        if (!record.iframe || !record.iframe.isConnected) return;
+        runtime.setNotice('htmlBlocked');
+      }, 6000);
+      annoHtmlFrames(runtime).push(record);
+      runtime.repaint();
+      return () => {
+        if (record.readyTimer) window.clearTimeout(record.readyTimer);
+        const frames = annoHtmlFrames(runtime);
+        const index = frames.indexOf(record);
+        if (index >= 0) frames.splice(index, 1);
+      };
     },
     /** Session ids the client currently knows, or null while the index is not ready. */
     knownSessionIds() {
@@ -1955,117 +3156,27 @@ function annoCreateRuntime(ctx) {
         .map((item) => item.id);
       return runtime.store.removeMany(ids);
     },
-    /** Counts for the sidebar cleanup menu. */
-    cleanupCounts() {
-      const list = runtime.store.list();
-      const current = runtime.state.currentSessionId;
-      return {
-        sent: list.filter((item) => annoIsSent(item)).length,
-        others: list.filter((item) => item.source === 'chat' && item.sessionId !== current).length,
-        total: list.length,
-      };
-    },
-    /** Explicit cleanup actions from the sidebar list. */
-    cleanupAnnotations(kind) {
-      const list = runtime.store.list();
-      const current = runtime.state.currentSessionId;
-      let targets;
-      if (kind === 'sent') targets = list.filter((item) => annoIsSent(item));
-      else if (kind === 'others') targets = list.filter((item) => item.source === 'chat' && item.sessionId !== current);
-      else targets = [];
-      const removed = runtime.store.removeMany(targets.map((item) => item.id));
-      if (removed > 0) runtime.setNotice('cleaned');
-      return removed;
-    },
-    /** Register the right-sidebar annotation tab type; safe to retry. */
-    registerAnnotationsTab() {
-      if (runtime.tabRegistered) return true;
-      let tabs = null;
-      try {
-        tabs = ctx && typeof ctx.get === 'function' ? ctx.get('sidebarRightTabs') : null;
-      } catch {
-        tabs = null;
-      }
-      if (!tabs || typeof tabs.register !== 'function') return false;
-      try {
-        const dispose = tabs.register({
-          id: ANNO_TAB_ID,
-          kind: ANNO_TAB_KIND,
-          priority: 'extension',
-          title: () => (annoIsChineseLocale(runtime) ? '标注' : 'Annotations'),
-        });
-        runtime.tabDispose = typeof dispose === 'function' ? dispose : null;
-        runtime.tabRegistered = true;
-        return true;
-      } catch (error) {
-        const message = String(error && error.message ? error.message : error);
-        if (message.includes('already registered')) {
-          runtime.tabRegistered = true;
-          return true;
-        }
-        console.warn('[annotation] sidebar tab type registration failed', error);
-        return false;
-      }
-    },
-    /** Sent document annotations are transient: drop them after the send settles. */
-    scheduleDocumentCleanup(ids) {
-      const list = Array.isArray(ids) ? ids : [];
-      const docIds = list.filter((id) => {
-        const annotation = runtime.store.find(id);
-        return annotation !== null && annotation.source === 'document';
-      });
-      if (docIds.length === 0) return;
-      window.setTimeout(() => {
-        runtime.store.removeMany(docIds);
-        runtime.repaint();
-      }, 1200);
-    },
-    /** Remove sent document annotations left over from earlier rounds. */
-    cleanupSentDocuments() {
+    /** Remove sent annotations left over from earlier rounds. */
+    cleanupSentAnnotations() {
       const ids = runtime.store.list()
-        .filter((item) => item.source === 'document' && annoIsSent(item))
+        .filter((item) => annoIsSent(item))
         .map((item) => item.id);
       return runtime.store.removeMany(ids);
     },
-    /** Open (or focus) the annotation list as a native right-sidebar tab. */
-    openAnnotationsTab() {
-      runtime.pruneDeletedSessions();
-      runtime.registerAnnotationsTab();
-      let sidebarRight = null;
-      try {
-        sidebarRight = ctx && typeof ctx.get === 'function' ? ctx.get('sidebarRight') : null;
-      } catch {
-        sidebarRight = null;
-      }
-      if (!sidebarRight || typeof sidebarRight.openTab !== 'function') return false;
-      try {
-        sidebarRight.openTab(ANNO_TAB_KIND);
-        return true;
-      } catch {
-        // A hot reload can leave the registry empty even though the body slot
-        // survived; retry registration once before reporting failure.
-        runtime.tabRegistered = false;
-        if (runtime.registerAnnotationsTab()) {
-          try {
-            sidebarRight.openTab(ANNO_TAB_KIND);
-            return true;
-          } catch {
-            return false;
-          }
-        }
-        return false;
-      }
-    },
     dispose() {
-      if (typeof runtime.tabDispose === 'function') {
+      if (typeof runtime.htmlPreview === 'function') {
         try {
-          runtime.tabDispose();
+          runtime.htmlPreview();
         } catch {
           /* ignore */
         }
       }
-      runtime.tabDispose = null;
-      runtime.tabRegistered = false;
+      runtime.htmlPreview = null;
+      runtime.htmlPreviewRegistered = false;
+      for (const entry of runtime.htmlFrames || []) {
+        if (entry.readyTimer) window.clearTimeout(entry.readyTimer);
+      }
+      runtime.htmlFrames = [];
       if (runtime.repaintTimer) window.clearTimeout(runtime.repaintTimer);
       runtime.repaintTimer = 0;
       if (runtime.noticeTimer) window.clearTimeout(runtime.noticeTimer);
@@ -2409,8 +3520,60 @@ function annoAttachEngine(runtime) {
     runtime.schedulePins();
   };
 
+  // The annotatable HTML renderer runs its own engine inside an opaque iframe
+  // and reports through this channel. The frame's document stays unreachable,
+  // so every message is re-validated against the live frame registry.
+  const onFrameMessage = (event) => {
+    const data = event && event.data;
+    if (!data || typeof data !== 'object' || data.ns !== ANNO_HTML_NS) return;
+    const entry = annoHtmlFrameForSource(runtime, event.source);
+    if (!entry) return;
+    if (data.type === 'ready') {
+      entry.ready = true;
+      if (entry.readyTimer) window.clearTimeout(entry.readyTimer);
+      entry.readyTimer = 0;
+      entry.lastPaint = '';
+      annoPaintHtmlFrames(runtime);
+      return;
+    }
+    if (data.type === 'dismiss') {
+      if (runtime.state.toolbar !== null) runtime.setToolbar(null);
+      if (runtime.state.editor !== null) runtime.setEditor(null);
+      return;
+    }
+    if (data.type === 'selection') {
+      const segment = annoNormalizeSegment(data.segment);
+      if (segment === null) return;
+      const rect = annoHtmlViewportRect(entry, data.rect);
+      if (rect === null) return;
+      const wrapper = entry.iframe.closest('[data-textpreview-url]');
+      const info = (wrapper && annoDocInfo(wrapper)) || { docKey: entry.docKey, path: entry.path };
+      if (!info || typeof info.docKey !== 'string' || info.docKey === '') return;
+      runtime.setCurrentDocument(info.docKey, info.path || undefined);
+      runtime.setToolbar({
+        source: 'document',
+        docKey: info.docKey,
+        path: info.path || undefined,
+        segments: [segment],
+        rect,
+        text: segment.exact,
+      });
+      return;
+    }
+    if (data.type === 'hit' && typeof data.id === 'string') {
+      if (runtime.store.find(data.id) === null) return;
+      const rect = annoHtmlViewportRect(entry, data.rect);
+      runtime.openEditor(data.id, rect ? { x: rect.left, y: rect.top } : null);
+      return;
+    }
+    if (data.type === 'send') {
+      if (runtime.pendingAnnotations().length > 0) runtime.sendPendingAnnotations();
+    }
+  };
+
   // Window capture runs before any element handler, so an application handler
   // that stops propagation cannot hide a selection release from the plugin.
+  listen(window, 'message', onFrameMessage, false);
   listen(window, 'pointerdown', onPointerDown, true);
   listen(window, 'pointerup', onPointerUp, true);
   listen(window, 'mousedown', onPointerDown, true);
@@ -2471,12 +3634,13 @@ function annoAttachEngine(runtime) {
 
 /* ---- src/ui.js ---- */
 /**
- * React surface of the annotation plugin: a frame-wide overlay (highlight
- * toolbar, note editor, annotation list, toast) and the sidebar-foot trigger.
+ * React surface of the annotation plugin: a frame-wide overlay (comment box,
+ * note editor, inline pins, toast) and the aggregated card above the composer.
  *
- * All surfaces are rendered through `shell.overlay` / `sidebar.footer.action`
- * slots, inherit the host theme, and carry data-dsh-anno-ui so the engine can
- * ignore pointer events and text selection that originate inside them.
+ * The surfaces are rendered through `shell.overlay` and
+ * `conversation.input.overlay`, inherit the host theme, and carry
+ * data-dsh-anno-ui so the engine can ignore pointer events and text selection
+ * that originate inside them.
  */
 
 /** The slot-provided translator, or a passthrough when the owner projects none. */
@@ -2532,37 +3696,11 @@ function AnnoIcon(props) {
     focusable: false,
   };
   switch (props.name) {
-    case 'highlighter':
-      return h('svg', common, [
-        h('path', { key: 'a', d: 'M12.9 3.6a2 2 0 0 1 2.8 0l.7.7a2 2 0 0 1 0 2.8l-7.3 7.3-3.6.9.9-3.6z' }),
-        h('path', { key: 'b', d: 'M4.2 16.4h11.6' }),
-      ]);
-    case 'copy':
-      return h('svg', common, [
-        h('rect', { key: 'a', x: '7.5', y: '7.5', width: '9', height: '9', rx: '2' }),
-        h('path', { key: 'b', d: 'M12.5 7.5V5.8A1.8 1.8 0 0 0 10.7 4H5.3A1.3 1.3 0 0 0 4 5.3v5.4a1.8 1.8 0 0 0 1.8 1.8h1.7' }),
-      ]);
     case 'trash':
       return h('svg', common, [
         h('path', { key: 'a', d: 'M4.5 6h11' }),
         h('path', { key: 'b', d: 'M6.2 6l.6 9.1a1.4 1.4 0 0 0 1.4 1.3h3.6a1.4 1.4 0 0 0 1.4-1.3L13.8 6' }),
         h('path', { key: 'c', d: 'M8.1 6V4.6A1.1 1.1 0 0 1 9.2 3.5h1.6a1.1 1.1 0 0 1 1.1 1.1V6' }),
-      ]);
-    case 'jump':
-      return h('svg', common, [
-        h('path', { key: 'a', d: 'M4.2 15.8L15.6 4.4' }),
-        h('path', { key: 'b', d: 'M8.2 4.4h7.4v7.4' }),
-      ]);
-    case 'close':
-      return h('svg', common, [
-        h('path', { key: 'a', d: 'M5.2 5.2l9.6 9.6' }),
-        h('path', { key: 'b', d: 'M14.8 5.2l-9.6 9.6' }),
-      ]);
-    case 'download':
-      return h('svg', common, [
-        h('path', { key: 'a', d: 'M10 3.6v8.2' }),
-        h('path', { key: 'b', d: 'M6.6 8.8L10 12.2l3.4-3.4' }),
-        h('path', { key: 'c', d: 'M4.4 15.2h11.2' }),
       ]);
     case 'note':
       return h('svg', common, [
@@ -2820,244 +3958,6 @@ function AnnoEditor(props) {
   );
 }
 
-/** One annotation row inside the right-sidebar list. */
-function AnnoSidebarRow(props) {
-  const t = annoTranslate(props);
-  const runtime = props.runtime;
-  const annotation = props.annotation;
-  const sourceLabel = props.sourceLabel;
-  const number = props.number || 0;
-  const quote = annoQuotePreview(annotation, 120);
-  const note = typeof annotation.note === 'string' ? annotation.note.trim() : '';
-
-  const jump = () => {
-    const open = runtime.state.openDocs.some(
-      (entry) =>
-        entry.docKey === annotation.docKey ||
-        (typeof annotation.path === 'string' && annotation.path !== '' && entry.path === annotation.path),
-    );
-    if (annotation.source === 'document' && !open) {
-      Promise.resolve(runtime.openDocument(annotation.docKey)).then((opened) => {
-        if (!opened) {
-          runtime.setNotice('openFailed');
-          return;
-        }
-        window.setTimeout(() => runtime.reveal(annotation), 900);
-      });
-      return;
-    }
-    runtime.reveal(annotation);
-  };
-
-  return h(
-    'div',
-    {
-      className: 'anno-row',
-      role: 'button',
-      tabIndex: 0,
-      onClick: jump,
-      onKeyDown: (event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          jump();
-        }
-      },
-    },
-    h('span', { className: 'anno-num', title: t('panel.jump') }, String(number)),
-    h(
-      'div',
-      { className: 'anno-row-main' },
-      h('div', { className: 'anno-row-quote' }, quote === '' ? t('panel.noNote') : quote),
-      note === '' ? null : h('div', { className: 'anno-row-note' }, note),
-      h('div', { className: 'anno-row-meta' }, sourceLabel),
-    ),
-    h(
-      'button',
-      {
-        type: 'button',
-        className: 'anno-icon-btn anno-row-action',
-        title: t('panel.jump'),
-        'aria-label': t('panel.jump'),
-        onClick: (event) => {
-          event.stopPropagation();
-          jump();
-        },
-      },
-      h(AnnoIcon, { name: 'jump', size: 14 }),
-    ),
-    h(
-      'button',
-      {
-        type: 'button',
-        className: 'anno-icon-btn anno-row-action',
-        title: t('panel.delete'),
-        'aria-label': t('panel.delete'),
-        onClick: (event) => {
-          event.stopPropagation();
-          runtime.removeAnnotation(annotation.id);
-        },
-      },
-      h(AnnoIcon, { name: 'trash', size: 14 }),
-    ),
-  );
-}
-
-/**
- * Right-sidebar tab body: the annotation list docks where documents dock, so
- * reviewing annotations never covers the conversation.
- */
-function AnnoSidebarBody(props) {
-  const t = annoTranslate(props);
-  const runtime = props.runtime;
-  annoUseRuntime(runtime);
-  const [menuOpen, setMenuOpen] = React.useState(false);
-  React.useEffect(() => {
-    runtime.pruneDeletedSessions();
-  }, [runtime]);
-  const state = runtime.state;
-  const visible = annoVisibleAnnotations(runtime.store.list(), { sessionId: state.currentSessionId });
-  const counts = runtime.cleanupCounts();
-  const openKeys = new Set(state.openDocs.map((entry) => entry.docKey));
-  const openPaths = new Set(state.openDocs.map((entry) => entry.path).filter(Boolean));
-  const isOpen = (annotation) =>
-    (typeof annotation.docKey === 'string' && openKeys.has(annotation.docKey)) ||
-    (typeof annotation.path === 'string' && annotation.path !== '' && openPaths.has(annotation.path));
-  const openDocs = visible.documents.filter(isOpen);
-  const otherDocs = visible.documents.filter((annotation) => !isOpen(annotation));
-  const otherGroups = annoGroupDocuments(otherDocs);
-  const total = visible.count;
-
-  const saveLabel = (annotation) => {
-    if (annotation.source === 'chat') return t('panel.chatSource');
-    const path = typeof annotation.path === 'string' ? annotation.path : '';
-    const name = path.split(/[\\/]/).filter(Boolean).pop();
-    return name || t('panel.unknownPath');
-  };
-
-  const row = (annotation) =>
-    h(AnnoSidebarRow, {
-      key: annotation.id,
-      t: t,
-      runtime: runtime,
-      annotation: annotation,
-      number: visible.numbers.get(annotation.id) || 0,
-      sourceLabel: saveLabel(annotation),
-    });
-
-  return h(
-    'div',
-    { className: 'anno-side', 'data-dsh-anno-ui': '' },
-    h(
-      'div',
-      { className: 'anno-side-head' },
-      h('span', { className: 'anno-side-title' }, t('panel.title')),
-      h('span', { className: 'anno-side-count' }, total === 0 ? t('panel.count.empty') : t('panel.count', { n: total })),
-      h(
-        'span',
-        { className: 'anno-side-menu-wrap' },
-        h(
-          'button',
-          {
-            type: 'button',
-            className: 'anno-side-clean',
-            title: t('side.cleanHint'),
-            'aria-expanded': menuOpen ? 'true' : 'false',
-            onClick: () => setMenuOpen((value) => !value),
-          },
-          t('side.clean'),
-        ),
-        menuOpen
-          ? h(
-              'div',
-              { className: 'anno-clean-menu', role: 'menu' },
-              h(
-                'button',
-                {
-                  type: 'button',
-                  role: 'menuitem',
-                  className: 'anno-clean-item',
-                  disabled: counts.sent === 0,
-                  onClick: () => {
-                    runtime.cleanupAnnotations('sent');
-                    setMenuOpen(false);
-                  },
-                },
-                h('span', null, t('side.cleanSent')),
-                h('span', { className: 'anno-clean-count' }, String(counts.sent)),
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  role: 'menuitem',
-                  className: 'anno-clean-item',
-                  disabled: counts.others === 0,
-                  onClick: () => {
-                    runtime.cleanupAnnotations('others');
-                    setMenuOpen(false);
-                  },
-                },
-                h('span', null, t('side.cleanOthers')),
-                h('span', { className: 'anno-clean-count' }, String(counts.others)),
-              ),
-              h('div', { className: 'anno-clean-hint' }, t('side.cleanHint')),
-            )
-          : null,
-      ),
-    ),
-    h(
-      'div',
-      { className: 'anno-side-body' },
-      total === 0 ? h('div', { className: 'anno-panel-empty' }, t('panel.empty')) : null,
-      visible.chat.length === 0
-        ? null
-        : h(
-            'div',
-            { className: 'anno-section' },
-            h('div', { className: 'anno-section-title' }, t('panel.section.chat')),
-            visible.chat.map(row),
-          ),
-      openDocs.length === 0
-        ? null
-        : h(
-            'div',
-            { className: 'anno-section' },
-            h('div', { className: 'anno-section-title' }, t('panel.section.docs')),
-            openDocs.map(row),
-          ),
-      otherGroups.length === 0
-        ? null
-        : h(
-            'div',
-            { className: 'anno-section' },
-            h('div', { className: 'anno-section-title' }, t('panel.section.other')),
-            otherGroups.map((group) =>
-              h(
-                'div',
-                { key: group.docKey + '|' + (group.path || ''), className: 'anno-group' },
-                h(
-                  'div',
-                  { className: 'anno-group-title', title: group.path || '' },
-                  (group.path || t('panel.unknownPath')).split(/[\\/]/).filter(Boolean).pop() ||
-                    t('panel.unknownPath'),
-                ),
-                group.annotations.map((annotation) =>
-                  h(AnnoSidebarRow, {
-                    key: annotation.id,
-                    t: t,
-                    runtime: runtime,
-                    annotation: annotation,
-                    number: visible.numbers.get(annotation.id) || 0,
-                    sourceLabel: saveLabel(annotation),
-                  }),
-                ),
-              ),
-            ),
-          ),
-    ),
-  );
-}
-
 /** Transient toast for copy/open/missing feedback. */
 function AnnoNotice(props) {
   const t = annoTranslate(props);
@@ -3070,9 +3970,8 @@ function AnnoNotice(props) {
     sending: t('send.sending'),
     sent: t('send.sent'),
     failed: t('send.failed'),
-    tabFailed: t('side.failed'),
-    cleaned: t('side.cleaned'),
     copied: t('copy.done'),
+    htmlBlocked: t('html.blocked'),
   };
   const text = map[notice] || '';
   if (text === '') return null;
@@ -3122,6 +4021,7 @@ function AnnoPendingCard(props) {
   if (pending.length === 0) return null;
   const numbers = annoVisibleAnnotations(runtime.store.list(), {
     sessionId: runtime.state.currentSessionId,
+    openDocs: runtime.state.openDocs || [],
   }).numbers;
 
   const jump = (annotation) => {
@@ -3308,10 +4208,9 @@ function AnnoSendBridge(props) {
       window.setTimeout(() => {
         try {
           inputActions.submit();
-          runtime.store.markSent(ids);
+          runtime.store.removeMany(ids);
           runtime.repaint();
           runtime.setNotice('sent');
-          runtime.scheduleDocumentCleanup(ids);
         } catch {
           note(false, 'submit-failed');
           runtime.setNotice('failed');
@@ -3358,10 +4257,9 @@ function AnnoSendBridge(props) {
       window.setTimeout(() => {
         try {
           inputActions.submit();
-          runtime.store.markSent(ids);
+          runtime.store.removeMany(ids);
           runtime.repaint();
           runtime.setNotice('sent');
-          runtime.scheduleDocumentCleanup(ids);
         } catch {
           runtime.diag.composerMerge = { at: Date.now(), ok: false, reason: 'submit-failed' };
           runtime.setNotice('failed');
@@ -3416,37 +4314,6 @@ function AnnoOverlay(props) {
   );
 }
 
-/** Sidebar-foot trigger that opens the annotations tab in the right sidebar. */
-function AnnoFooterButton(props) {
-  const runtime = props.runtime;
-  const t = annoTranslate(props);
-  const wide = props.wide !== false;
-  annoUseRuntime(runtime);
-  const count = annoVisibleAnnotations(runtime.store.list(), {
-    sessionId: runtime.state.currentSessionId,
-  }).count;
-
-  return h(
-    'button',
-    {
-      type: 'button',
-      className: 'anno-footer-btn' + (wide ? '' : ' is-rail'),
-      title: t('footer.hint'),
-      'aria-label': t('footer.title'),
-      'data-dsh-anno-ui': '',
-      onClick: (event) => {
-        event.stopPropagation();
-        if (!runtime.openAnnotationsTab()) runtime.setNotice('tabFailed');
-      },
-    },
-    h(AnnoIcon, { name: 'highlighter', size: 18 }),
-    wide ? h('span', { className: 'anno-footer-label' }, t('footer.title')) : null,
-    count > 0
-      ? h('span', { className: 'anno-footer-count' }, count > 99 ? '99+' : String(count))
-      : null,
-  );
-}
-
 /**
  * Optional compatibility stylesheet (default off): hides another sidebar
  * plugin's own "add to conversation" selection button so it cannot cover the
@@ -3491,24 +4358,6 @@ function annoPluginCss() {
     '.anno-text-btn:disabled{opacity:0.45;cursor:default;}',
     '.anno-text-btn-danger{color:var(--dsw-alias-state-error-primary);border-color:transparent;}',
     '.anno-text-btn-primary{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary);}',
-    '.anno-panel{position:fixed;pointer-events:auto;z-index:1190;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;box-sizing:border-box;border-radius:14px;background:var(--dsw-alias-bg-overlay);border:0.5px solid var(--dsw-alias-border-l2);box-shadow:0 16px 40px rgba(0,0,0,0.24);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px;overflow:hidden;}',
-    '.anno-panel-header{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:0.5px solid var(--dsw-alias-border-l1);flex:none;}',
-    '.anno-panel-title{font-weight:600;}',
-    '.anno-panel-count{margin-left:auto;color:var(--dsw-alias-label-secondary);font-size:11px;padding:1px 7px;border-radius:999px;background:color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent);}',
-    '.anno-panel-body{flex:1;min-height:0;overflow-y:auto;padding:6px 8px 10px;}',
-    '.anno-panel-empty{padding:22px 14px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.6;text-align:center;}',
-    '.anno-section{margin-top:6px;}',
-    '.anno-section-title{padding:6px 6px 4px;color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:600;letter-spacing:0.02em;text-transform:none;}',
-    '.anno-group{margin-top:4px;}',
-    '.anno-group-title{padding:4px 6px;color:var(--dsw-alias-label-secondary);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-    '.anno-row{display:flex;align-items:flex-start;gap:8px;padding:7px 6px;border-radius:8px;cursor:pointer;}',
-    '.anno-row:hover{background:color-mix(in srgb, var(--dsw-alias-label-primary) 7%, transparent);}',
-    '.anno-row-main{flex:1;min-width:0;}',
-    '.anno-row-quote{font-size:12px;line-height:1.5;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}',
-    '.anno-row-note{margin-top:2px;color:var(--dsw-alias-label-secondary);font-size:11.5px;line-height:1.45;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}',
-    '.anno-row-meta{margin-top:3px;color:var(--dsw-alias-label-secondary);font-size:10.5px;opacity:0.85;}',
-    '.anno-row-action{flex:none;opacity:0;}',
-    '.anno-row:hover .anno-row-action,.anno-row:focus-within .anno-row-action{opacity:1;}',
     '.anno-pin{position:fixed;z-index:1185;transform:translateY(-50%);min-width:17px;height:17px;padding:0 4px;border-radius:999px;border:1px solid var(--dsw-alias-bg-overlay);background:var(--dsw-alias-state-warn-primary);color:#fff;font-family:inherit;font-size:10px;line-height:15px;font-weight:600;text-align:center;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,0.25);}',
     '.anno-pin:hover{transform:translateY(-50%) scale(1.15);}',
     '.anno-pin.is-sent{opacity:0.35;}',
@@ -3516,21 +4365,6 @@ function annoPluginCss() {
     '.anno-pin-green{background:var(--dsw-alias-state-success-primary);}',
     '.anno-pin-blue{background:var(--dsw-alias-brand-primary);}',
     '.anno-pin-pink{background:var(--dsw-alias-state-error-primary);}',
-    '.anno-side{box-sizing:border-box;display:flex;flex-direction:column;height:100%;min-height:0;padding:10px 12px 14px;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px;overflow:hidden;}',
-    '.anno-side-head{display:flex;align-items:center;gap:8px;flex:none;padding-bottom:8px;border-bottom:0.5px solid var(--dsw-alias-border-l1);}',
-    '.anno-side-title{font-weight:600;}',
-    '.anno-side-count{margin-left:auto;color:var(--dsw-alias-label-secondary);font-size:11px;padding:1px 7px;border-radius:999px;background:color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent);}',
-    '.anno-side-menu-wrap{position:relative;flex:none;}',
-    '.anno-side-clean{padding:2px 8px;border:0.5px solid var(--dsw-alias-border-l1);border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary);font-family:inherit;font-size:11px;line-height:18px;cursor:pointer;}',
-    '.anno-side-clean:hover{background:color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent);color:var(--dsw-alias-label-primary);}',
-    '.anno-clean-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:20;display:flex;flex-direction:column;width:210px;box-sizing:border-box;padding:4px;border-radius:10px;background:var(--dsw-alias-bg-overlay);border:0.5px solid var(--dsw-alias-border-l2);box-shadow:0 10px 24px rgba(0,0,0,0.2);}',
-    '.anno-clean-item{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border:none;border-radius:7px;background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;text-align:left;cursor:pointer;}',
-    '.anno-clean-item:hover:not(:disabled){background:color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent);}',
-    '.anno-clean-item:disabled{opacity:0.4;cursor:default;}',
-    '.anno-clean-count{min-width:18px;padding:0 5px;border-radius:999px;background:color-mix(in srgb, var(--dsw-alias-label-primary) 10%, transparent);color:var(--dsw-alias-label-secondary);font-size:10.5px;line-height:16px;text-align:center;}',
-    '.anno-clean-hint{padding:6px 8px 4px;color:var(--dsw-alias-label-secondary);font-size:10.5px;line-height:1.45;}',
-    '.anno-side-body{flex:1;min-height:0;overflow-y:auto;padding-top:4px;}',
-    '.anno-num{flex:none;min-width:17px;height:17px;margin-top:1px;border-radius:999px;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 16%, transparent);color:var(--dsw-alias-brand-primary);font-size:10px;line-height:17px;font-weight:600;text-align:center;}',
     '.anno-pending{position:absolute;left:0;bottom:100%;margin-bottom:12px;z-index:30;pointer-events:auto;display:flex;flex-direction:column;box-sizing:border-box;width:min(400px,100%);padding:4px;border-radius:12px;background:var(--dsw-alias-bg-overlay);border:0.5px solid var(--dsw-alias-border-l2);box-shadow:0 10px 26px rgba(0,0,0,0.18);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;}',
     '.anno-pending-head{display:flex;align-items:center;gap:6px;}',
     '.anno-pending-toggle{flex:1;display:flex;align-items:center;gap:7px;min-width:0;padding:4px 6px;border:none;border-radius:8px;background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;text-align:left;cursor:pointer;}',
@@ -3548,11 +4382,6 @@ function annoPluginCss() {
     '.anno-pending-note{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:1.4;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}',
     '.anno-pending-hint{padding:4px 6px 2px;color:var(--dsw-alias-label-secondary);font-size:10.5px;}',
     '.anno-notice{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:1220;padding:6px 12px;border-radius:999px;background:var(--dsw-alias-bg-overlay);border:0.5px solid var(--dsw-alias-border-l2);box-shadow:0 8px 22px rgba(0,0,0,0.18);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;pointer-events:none;}',
-    '.anno-footer-btn{display:flex;pointer-events:auto;align-items:center;justify-content:flex-start;gap:8px;box-sizing:border-box;flex:0 1 auto;min-width:0;max-width:100%;height:32px;padding:0 8px;border:none;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary);font-family:inherit;font-size:13px;text-align:left;cursor:pointer;overflow:hidden;}',
-    '.anno-footer-btn:hover,.anno-footer-btn.is-open{background:color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent);color:var(--dsw-alias-label-primary);}',
-    '.anno-footer-btn.is-rail{width:36px;height:36px;justify-content:center;padding:0;}',
-    '.anno-footer-label{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-    '.anno-footer-count{flex:none;min-width:16px;height:16px;padding:0 5px;border-radius:999px;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 16%, transparent);color:var(--dsw-alias-brand-primary);font-size:10.5px;line-height:16px;text-align:center;}',
   ].join('\n');
 }
 
@@ -3579,35 +4408,21 @@ const ANNO_ZH = {
   "pending.send": "发送全部",
   "pending.hint": "⌘/Ctrl+Enter 发送全部给 AI",
   "panel.title": "标注",
-  "panel.empty": "还没有标注。选中对话或文档里的文字，写下评论即可。",
-  "panel.section.chat": "当前对话",
-  "panel.section.docs": "文档",
-  "panel.section.other": "其他文档",
-  "panel.jump": "跳转",
   "panel.delete": "删除",
-  "panel.count": "{n} 条",
   "panel.count.empty": "暂无",
-  "panel.unknownPath": "未知文档",
-  "panel.chatSource": "对话",
-  "panel.docSource": "文档",
   "panel.openFailed": "无法打开该文档",
   "panel.noNote": "无批注",
   "panel.jumpMissing": "当前视图中找不到这条标注",
-  "panel.close": "关闭标注面板",
-  "footer.title": "标注",
-  "footer.hint": "在右侧边栏打开标注列表",
   "send.none": "没有待发送的标注",
   "send.unavailable": "当前会话暂不可发送（未就绪）",
   "send.sending": "正在发送…",
   "send.sent": "已发送给 AI",
   "send.failed": "发送失败，请检查会话状态后重试",
-  "side.failed": "暂时无法打开侧边栏标注列表",
-  "side.clean": "清理",
-  "side.cleanSent": "清理已发送",
-  "side.cleanOthers": "清理其他会话",
-  "side.cleanHint": "已删除会话的标注会自动清理；归档会话的标注会保留",
-  "side.cleaned": "已清理标注",
   "copy.done": "已复制原文",
+  "html.loading": "正在准备网页预览…",
+  "html.failed": "无法显示这个网页",
+  "html.frame": "网页预览",
+  "html.blocked": "这个网页阻止了标注脚本（CSP），标注不可用",
 };
 
 const ANNO_EN = {
@@ -3626,53 +4441,161 @@ const ANNO_EN = {
   "pending.send": "Send all",
   "pending.hint": "Cmd/Ctrl+Enter sends everything to the AI",
   "panel.title": "Annotations",
-  "panel.empty": "No annotations yet. Select text in a reply or a document and add a comment.",
-  "panel.section.chat": "This conversation",
-  "panel.section.docs": "Documents",
-  "panel.section.other": "Other documents",
-  "panel.jump": "Go to",
   "panel.delete": "Delete",
-  "panel.count": "{n}",
   "panel.count.empty": "None",
-  "panel.unknownPath": "Unknown document",
-  "panel.chatSource": "Conversation",
-  "panel.docSource": "Document",
   "panel.openFailed": "This document could not be opened",
   "panel.noNote": "No note",
   "panel.jumpMissing": "This annotation is not in the current view",
-  "panel.close": "Close annotation panel",
-  "footer.title": "Annotations",
-  "footer.hint": "Open annotations in the right sidebar",
   "send.none": "No pending annotations",
   "send.unavailable": "This conversation is not ready to send",
   "send.sending": "Sending…",
   "send.sent": "Sent to the AI",
   "send.failed": "Send failed; check the conversation state and retry",
-  "side.failed": "The annotations list could not be opened right now",
-  "side.clean": "Clean up",
-  "side.cleanSent": "Clean sent annotations",
-  "side.cleanOthers": "Clean other sessions",
-  "side.cleanHint": "Annotations of deleted sessions are pruned automatically; archived sessions keep theirs",
-  "side.cleaned": "Annotations cleaned up",
   "copy.done": "Selected text copied",
+  "html.loading": "Preparing the page preview…",
+  "html.failed": "This page could not be displayed",
+  "html.frame": "Page preview",
+  "html.blocked": "This page blocked the annotation script (CSP); annotation is unavailable",
 };
 
 /* ---- src/plugin.js ---- */
 /**
  * Plugin body: registers the annotation runtime, its stylesheet, its DOM
- * engine and the two client surfaces (frame overlay and sidebar trigger).
+ * engine and the client surfaces (frame overlay, composer card, send bridge,
+ * and the annotatable HTML document renderer).
  *
- * Both surfaces are additive list entries with fresh ids, so no shipped UI is
+ * Every surface is an additive slot entry with a fresh id, so no shipped UI is
  * replaced. The runtime owns every listener; unloading the plugin removes the
  * stylesheet, the listeners, the observers and the painted highlights.
  */
 
 const ANNO_NS = 'annotation';
-const ANNO_INJECT = ['slots', 'locale', 'sessions', 'sidebarRight', 'sidebarRightTabs'];
+const ANNO_INJECT = ['slots', 'locale', 'sessions', 'sidebarRight'];
 const ANNO_PLUGIN_ID = 'dsh-annotation';
+
+/** Enable or retire the annotatable renderer as the interactive-preview setting changes. */
+function annoSyncHtmlPreview(runtime) {
+  const enabled = annoHtmlDeveloperToolsEnabled(runtime.ctx);
+  if (enabled === true) {
+    annoRegisterHtmlPreview(runtime);
+    return;
+  }
+  if (enabled === false && typeof runtime.htmlPreview === 'function') {
+    try {
+      runtime.htmlPreview();
+    } catch {
+      /* already disposed */
+    }
+    runtime.htmlPreview = null;
+    runtime.htmlPreviewRegistered = false;
+    runtime.htmlPreviewAttempts = 0;
+  }
+}
 
 /** Last mounted runtime, for the optional debugging handle. */
 let annoRuntimeInstance = null;
+
+/**
+ * Register the annotatable HTML document implementation.
+ *
+ * The builtin HTML preview isolates the page in an opaque-origin iframe, so it
+ * cannot be annotated from the parent. This renderer claims `.html`/`.htm` in
+ * the higher `extension` band, runs the page in the same sandbox and adds a
+ * bridge inside; the builtin implementation stays selectable in the preview's
+ * own implementation menu. It only takes over while the host's interactive
+ * preview runs pages with script permission.
+ *
+ * @param {object} runtime annotation runtime
+ * @returns {(() => void) | null} disposer, or null while the registry is not ready
+ */
+function annoRegisterHtmlPreview(runtime) {
+  if (typeof runtime.htmlPreview === 'function') return runtime.htmlPreview;
+  if ((runtime.htmlPreviewAttempts || 0) >= 24) return null;
+  runtime.htmlPreviewAttempts = (runtime.htmlPreviewAttempts || 0) + 1;
+  const ctx = runtime.ctx;
+  if (!ctx || typeof ctx.get !== 'function') return null;
+
+  // Without script permission the host's static, sanitized preview is the
+  // correct default; an annotatable copy would silently weaken it. The
+  // preference starts false until the settings document arrives, so a `false`
+  // answer is retried rather than locked in.
+  if (annoHtmlDeveloperToolsEnabled(ctx) !== true) return null;
+
+  let previews = null;
+  try {
+    previews = ctx.get('documentPreviews');
+  } catch {
+    previews = null;
+  }
+  if (!previews || typeof previews.register !== 'function') return null;
+
+  let disposeRegistry = null;
+  try {
+    disposeRegistry = previews.register({
+      id: ANNO_HTML_BODY_ID,
+      extensions: ANNO_HTML_EXTENSIONS.slice(),
+      priority: 'extension',
+      title: () => (annoIsChineseLocale(runtime) ? 'HTML（可标注）' : 'HTML (annotatable)'),
+      loading: 'bytes-complete',
+      wrap: false,
+    });
+  } catch (error) {
+    const message = String(error && error.message ? error.message : error);
+    if (!message.includes('duplicate')) {
+      console.warn('[annotation] html document renderer registration failed', error);
+      return null;
+    }
+    // A previous instance of this plugin already owns the registration.
+    disposeRegistry = null;
+  }
+
+  let disposeSlot = null;
+  try {
+    disposeSlot = ctx.slots.inject('sidebar.right.tab.document', () =>
+      ctx.slots.register(
+        {
+          name: 'sidebar.right.tab.document',
+          key: ANNO_HTML_BODY_ID,
+          locale: ANNO_NS,
+          inject: () => ({ runtime }),
+        },
+        AnnoHtmlBody,
+      ),
+    );
+  } catch (error) {
+    console.warn('[annotation] html document body registration failed', error);
+    if (typeof disposeRegistry === 'function') {
+      try {
+        disposeRegistry();
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  const dispose = () => {
+    runtime.htmlPreviewAttempts = 0;
+    if (typeof disposeSlot === 'function') {
+      try {
+        disposeSlot();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (typeof disposeRegistry === 'function') {
+      try {
+        disposeRegistry();
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+  runtime.htmlPreview = dispose;
+  runtime.htmlPreviewRegistered = true;
+  annoWriteDiag(runtime, 'html-preview-registered');
+  return dispose;
+}
 
 /**
  * @param {object} ctx client plugin context (slots + locale services)
@@ -3693,14 +4616,9 @@ function annoApply(ctx) {
     console.warn('[annotation] CSS Custom Highlight API unavailable; annotations are stored but not painted');
   }
 
-  // Native right-sidebar tab type: the annotation list docks beside documents
-  // instead of covering the conversation in a centered dialog. The registry is
-  // injected above, and the runtime keeps a lazy retry for compositions that
-  // mount it late.
-  runtime.registerAnnotationsTab();
-  // Document annotations are transient by design: a sent PDF/doc highlight
-  // must not survive into the next modification round.
-  runtime.cleanupSentDocuments();
+  // Sent annotations are transient: the message carries every quote and note,
+  // so a batch left over from an earlier round is dropped on load.
+  runtime.cleanupSentAnnotations();
 
   ctx.effect(() => {
     const style = document.createElement('style');
@@ -3718,6 +4636,28 @@ function annoApply(ctx) {
   }, 'annotation: stylesheet');
 
   ctx.effect(() => annoAttachEngine(runtime), 'annotation: selection and mutation engine');
+
+  // The document registry and the settings service publish at their own pace,
+  // so the renderer registration retries briefly instead of failing once.
+  ctx.effect(() => {
+    let unwatch = null;
+    const sync = () => {
+      if (unwatch === null) unwatch = annoWatchDeveloperTools(runtime, sync);
+      annoSyncHtmlPreview(runtime);
+    };
+    sync();
+    const timers = [600, 1800, 4000, 9000, 16000, 30000].map((ms) => window.setTimeout(sync, ms));
+    return () => {
+      for (const timer of timers) window.clearTimeout(timer);
+      if (typeof unwatch === 'function') {
+        try {
+          unwatch();
+        } catch {
+          /* already gone */
+        }
+      }
+    };
+  }, 'annotation: annotatable html renderer');
 
   // Chat annotations of deleted sessions are dead weight; prune them once the
   // session index has settled (retries tolerate a slow startup).
@@ -3789,46 +4729,13 @@ function annoApply(ctx) {
     console.warn('[annotation] composer send bridge registration failed', error);
   }
 
-  try {
-    ctx.slots.inject('sidebar.footer.action', () =>
-      ctx.slots.register(
-        {
-          name: 'sidebar.footer.action',
-          id: 'annotation.trigger',
-          order: 20,
-          locale: ANNO_NS,
-          inject: () => ({ runtime }),
-        },
-        AnnoFooterButton,
-      ),
-    );
-  } catch (error) {
-    console.warn('[annotation] sidebar.footer.action registration failed', error);
-  }
-
-  try {
-    ctx.slots.inject('sidebar.right.pane.tab', () =>
-      ctx.slots.register(
-        {
-          name: 'sidebar.right.pane.tab',
-          key: ANNO_TAB_ID,
-          locale: ANNO_NS,
-          inject: () => ({ runtime }),
-        },
-        AnnoSidebarBody,
-      ),
-    );
-  } catch (error) {
-    console.warn('[annotation] sidebar tab body registration failed', error);
-  }
-
   annoWriteDiag(runtime, 'applied');
 
   // Small diagnostics handle: lets a user (or the author) inspect the live
   // state from DevTools without hunting through internal objects.
   ctx.effect(() => {
     const handle = {
-      version: '2.2.0',
+      version: '2.5.0',
       runtime,
       state: () => runtime.state,
       annotations: () => runtime.store.list(),
@@ -3847,10 +4754,10 @@ function annoApply(ctx) {
         assistantRows: document.querySelectorAll('[data-chat-flow-kind="assistant-step"]').length,
         docs: document.querySelectorAll('[data-textpreview-url]').length,
         docBodies: document.querySelectorAll('[data-textpreview-body]').length,
+        htmlFrames: document.querySelectorAll('iframe[data-dsh-anno-html-frame]').length,
         toolbar: runtime.state.toolbar !== null,
         editor: runtime.state.editor !== null,
         composerMerge: runtime.diag.composerMerge || null,
-        annotationsTab: runtime.tabRegistered === true,
         currentSessionId: runtime.state.currentSessionId,
       }),
       hideForeignSelectionPopup: (enabled) => {
@@ -3890,7 +4797,16 @@ function annoApply(ctx) {
         }
       },
       sendReady: () => annoConversationFor(runtime, runtime.state.currentSessionId) !== null,
-      openAnnotations: () => runtime.openAnnotationsTab(),
+      html: () => ({
+        registered: runtime.htmlPreviewRegistered === true,
+        implementation: ANNO_HTML_BODY_ID,
+        developerTools: annoHtmlDeveloperToolsEnabled(ctx),
+        frames: annoHtmlFrames(runtime).map((entry) => ({
+          docKey: entry.docKey,
+          path: entry.path,
+          ready: entry.ready === true,
+        })),
+      }),
       diagKey: 'dsh.annotation.diag.v1',
       writeDiag: (event) => annoWriteDiag(runtime, event || 'manual'),
       selectors: {

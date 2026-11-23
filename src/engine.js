@@ -681,6 +681,151 @@ function annoDocMatches(annotation, info) {
   return annoPathIsAbsolute(annotation.path) && annotation.path === info.path;
 }
 
+/** Frames registered by the annotatable HTML renderer, in mount order. */
+function annoHtmlFrames(runtime) {
+  if (!Array.isArray(runtime.htmlFrames)) runtime.htmlFrames = [];
+  return runtime.htmlFrames;
+}
+
+/** The registered HTML frame a window message came from. */
+function annoHtmlFrameForSource(runtime, source) {
+  if (!source) return null;
+  for (const entry of annoHtmlFrames(runtime)) {
+    try {
+      if (entry.iframe && entry.iframe.contentWindow === source) return entry;
+    } catch {
+      /* detached frame */
+    }
+  }
+  return null;
+}
+
+/** Post one bridge message into a frame; false when the frame is gone. */
+function annoHtmlPost(entry, message) {
+  let target = null;
+  try {
+    target = entry && entry.iframe ? entry.iframe.contentWindow : null;
+  } catch {
+    target = null;
+  }
+  if (!target) return false;
+  try {
+    target.postMessage({ ...message, ns: ANNO_HTML_NS }, '*');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Iframe box in the parent viewport. */
+function annoHtmlFrameBox(entry) {
+  try {
+    return entry && entry.iframe ? entry.iframe.getBoundingClientRect() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Translate a frame-internal rect into parent viewport coordinates. */
+function annoHtmlViewportRect(entry, rect) {
+  if (!rect || typeof rect !== 'object') return null;
+  const box = annoHtmlFrameBox(entry);
+  if (!box) return null;
+  const left = box.left + (Number(rect.left) || 0);
+  const top = box.top + (Number(rect.top) || 0);
+  const width = Number(rect.width) || 0;
+  const height = Number(rect.height) || 0;
+  return { left, top, right: left + width, bottom: top + height, width, height };
+}
+
+/** Observe the interactive-preview preference; null when the settings face is not mounted yet. */
+function annoWatchDeveloperTools(runtime, listener) {
+  try {
+    const forms = runtime.ctx.get('configForms');
+    const preference = forms && forms.developerTools;
+    const enabled = preference && preference.enabled;
+    if (enabled && typeof enabled.subscribe === 'function') return enabled.subscribe(listener);
+  } catch {
+    /* the settings service may not be mounted */
+  }
+  return null;
+}
+
+/** Whether the host runs the interactive HTML preview (arbitrary scripts); null while unavailable. */
+function annoHtmlDeveloperToolsEnabled(ctx) {
+  try {
+    const forms = ctx.get('configForms');
+    const preference = forms && forms.developerTools;
+    if (!preference) return null;
+    const enabled = preference.enabled;
+    if (typeof enabled === 'boolean') return enabled;
+    if (enabled && typeof enabled.getSnapshot === 'function') return enabled.getSnapshot() === true;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** The workspace-file read face, resolved lazily and cached only once found. */
+function annoWorkspaceFiles(runtime) {
+  if (runtime.workspaceFiles) return runtime.workspaceFiles;
+  const ctx = runtime.ctx;
+  if (!ctx || typeof ctx.get !== 'function') return null;
+  let files = null;
+  try {
+    const remote = ctx.get('remote');
+    if (remote && remote.workspaceFiles && typeof remote.workspaceFiles.readBytes === 'function') {
+      files = remote.workspaceFiles;
+    }
+  } catch {
+    files = null;
+  }
+  if (!files) {
+    try {
+      const direct = ctx.get('remote.workspaceFiles');
+      if (direct && typeof direct.readBytes === 'function') files = direct;
+    } catch {
+      files = null;
+    }
+  }
+  if (files) runtime.workspaceFiles = files;
+  return files;
+}
+
+/** Push the stored annotations of each live HTML frame into its bridge. */
+function annoPaintHtmlFrames(runtime, numbers) {
+  const frames = annoHtmlFrames(runtime);
+  if (frames.length === 0) return;
+  const list = runtime.store.list();
+  const numbering =
+    numbers ||
+    annoVisibleAnnotations(list, {
+      sessionId: runtime.state.currentSessionId,
+      openDocs: runtime.state.openDocs || [],
+    }).numbers;
+  for (const entry of frames) {
+    const annotations = [];
+    for (const annotation of list) {
+      if (!annoDocMatches(annotation, entry)) continue;
+      annotations.push({
+        id: annotation.id,
+        color: annotation.color,
+        number: numbering.get(annotation.id) || 0,
+        sent: annoIsSent(annotation),
+        segments: annotation.segments.map((segment) => ({
+          exact: segment.exact,
+          prefix: segment.prefix,
+          suffix: segment.suffix,
+          start: segment.start,
+        })),
+      });
+    }
+    const serial = JSON.stringify(annotations);
+    if (entry.lastPaint === serial) continue;
+    if (annoHtmlPost(entry, { type: 'paint', annotations })) entry.lastPaint = serial;
+  }
+}
+
 /** Describe the selection as a toolbar payload, or null when it is not annotatable. */
 function annoCaptureSelectionAttempt(runtime) {
   let selection;
@@ -999,8 +1144,13 @@ function annoPaint(runtime) {
     loose: ANNO_PAINT_STATS.loose,
     unresolved: unresolved.slice(0, 8),
   };
+  const numbering = annoVisibleAnnotations(runtime.store.list(), {
+    sessionId: runtime.state.currentSessionId,
+    openDocs,
+  }).numbers;
   runtime.setOpenDocuments(openDocs);
-  annoUpdatePins(runtime);
+  annoUpdatePins(runtime, numbering);
+  annoPaintHtmlFrames(runtime, numbering);
   if (!annoSupportsHighlight()) return;
   for (const color of ANNO_COLORS) {
     const name = ANNO_HIGHLIGHT_PREFIX + color;
@@ -1018,14 +1168,18 @@ function annoPaint(runtime) {
 }
 
 /** Recompute the inline annotation pins from the painted ranges. */
-function annoUpdatePins(runtime) {
+function annoUpdatePins(runtime, numbering) {
   if (!runtime || document.visibilityState === 'hidden') return;
   if (!runtime.paintedRanges) return;
   const next = [];
-  const numbers = annoVisibleAnnotations(runtime.store.list(), {
-    sessionId: runtime.state.currentSessionId,
-  }).numbers;
+  const numbers =
+    numbering ||
+    annoVisibleAnnotations(runtime.store.list(), {
+      sessionId: runtime.state.currentSessionId,
+      openDocs: runtime.state.openDocs || [],
+    }).numbers;
   for (const annotation of runtime.store.list()) {
+    if (annoIsSent(annotation)) continue;
     const ranges = runtime.paintedRanges.get(annotation.id);
     if (!ranges || ranges.length === 0) continue;
     let rect = null;
@@ -1195,6 +1349,11 @@ function annoCreateRuntime(ctx) {
   const runtime = {
     ctx: ctx || null,
     sidebarRight: undefined,
+    workspaceFiles: undefined,
+    htmlFrames: [],
+    htmlPreview: null,
+    htmlPreviewRegistered: false,
+    htmlPreviewAttempts: 0,
     store: annoCreateStore(annoLocalStorage()),
     state: {
       version: 0,
@@ -1209,8 +1368,6 @@ function annoCreateRuntime(ctx) {
     },
     paintedRanges: new Map(),
     pruneSize: 0,
-    tabRegistered: false,
-    tabDispose: null,
     diag: {
       enabled: annoReadDebugFlag(),
       engineAttached: false,
@@ -1294,10 +1451,9 @@ function annoCreateRuntime(ctx) {
       Promise.resolve()
         .then(() => conversation.send(text))
         .then(() => {
-          runtime.store.markSent(ids);
+          runtime.store.removeMany(ids);
           runtime.repaint();
           runtime.setNotice('sent');
-          runtime.scheduleDocumentCleanup(ids);
         })
         .catch(() => runtime.setNotice('failed'));
       return true;
@@ -1367,6 +1523,9 @@ function annoCreateRuntime(ctx) {
       runtime.store.add(normalized);
       runtime.setToolbar(null);
       runtime.repaint();
+      for (const entry of annoHtmlFrames(runtime)) {
+        if (annoDocMatches(normalized, entry)) annoHtmlPost(entry, { type: 'clear' });
+      }
       try {
         const selection = window.getSelection();
         if (selection) selection.removeAllRanges();
@@ -1392,6 +1551,12 @@ function annoCreateRuntime(ctx) {
       runtime.repaint();
     },
     reveal(annotation) {
+      if (annotation && annotation.source === 'document') {
+        for (const entry of annoHtmlFrames(runtime)) {
+          if (!annoDocMatches(annotation, entry)) continue;
+          if (annoHtmlPost(entry, { type: 'reveal', id: annotation.id })) return true;
+        }
+      }
       const found = annoReveal(runtime, annotation);
       if (!found) runtime.setNotice('missing');
       return found;
@@ -1411,6 +1576,67 @@ function annoCreateRuntime(ctx) {
       } catch {
         return false;
       }
+    },
+    /**
+     * Read one sibling file under the document's own authority, for inlining a
+     * stylesheet or classic script. Failure is not fatal: the document renders
+     * with that reference untouched.
+     * @param {string} sessionId session the file address names
+     * @param {string} reference relative reference from the document
+     * @param {string} baseFile the document's own path
+     * @param {AbortSignal} [signal] cancellation
+     * @returns {Promise<{data: Uint8Array} | null>}
+     */
+    readHtmlAsset(sessionId, reference, baseFile, signal) {
+      const files = annoWorkspaceFiles(runtime);
+      if (!files || typeof files.readBytes !== 'function') return Promise.resolve(null);
+      if (typeof sessionId !== 'string' || sessionId === '') return Promise.resolve(null);
+      const clean = typeof reference === 'string' ? reference.split(/[?#]/)[0] : '';
+      if (clean === '' || /^(?:[a-z][a-z\d+.-]*:|\/|\\|#|\?)/iu.test(clean) || clean.includes('\u0000')) {
+        return Promise.resolve(null);
+      }
+      try {
+        return files
+          .readBytes(sessionId, clean, { baseFile }, signal)
+          .then((result) => {
+            if (!result || result.ok !== true) return null;
+            const value = result.value;
+            if (!value || !value.data) return null;
+            return value;
+          }, () => null);
+      } catch {
+        return Promise.resolve(null);
+      }
+    },
+    /**
+     * Register one mounted HTML frame's bridge window.
+     * @param {{iframe: HTMLIFrameElement, docKey: string, path?: string}} entry frame identity
+     * @returns disposer that unregisters it
+     */
+    registerHtmlFrame(entry) {
+      if (!entry || !entry.iframe) return () => {};
+      const record = {
+        iframe: entry.iframe,
+        docKey: typeof entry.docKey === 'string' ? entry.docKey : '',
+        path: typeof entry.path === 'string' ? entry.path : '',
+        ready: false,
+        lastPaint: '',
+        readyTimer: 0,
+      };
+      record.readyTimer = window.setTimeout(() => {
+        record.readyTimer = 0;
+        if (record.ready === true) return;
+        if (!record.iframe || !record.iframe.isConnected) return;
+        runtime.setNotice('htmlBlocked');
+      }, 6000);
+      annoHtmlFrames(runtime).push(record);
+      runtime.repaint();
+      return () => {
+        if (record.readyTimer) window.clearTimeout(record.readyTimer);
+        const frames = annoHtmlFrames(runtime);
+        const index = frames.indexOf(record);
+        if (index >= 0) frames.splice(index, 1);
+      };
     },
     /** Session ids the client currently knows, or null while the index is not ready. */
     knownSessionIds() {
@@ -1449,117 +1675,27 @@ function annoCreateRuntime(ctx) {
         .map((item) => item.id);
       return runtime.store.removeMany(ids);
     },
-    /** Counts for the sidebar cleanup menu. */
-    cleanupCounts() {
-      const list = runtime.store.list();
-      const current = runtime.state.currentSessionId;
-      return {
-        sent: list.filter((item) => annoIsSent(item)).length,
-        others: list.filter((item) => item.source === 'chat' && item.sessionId !== current).length,
-        total: list.length,
-      };
-    },
-    /** Explicit cleanup actions from the sidebar list. */
-    cleanupAnnotations(kind) {
-      const list = runtime.store.list();
-      const current = runtime.state.currentSessionId;
-      let targets;
-      if (kind === 'sent') targets = list.filter((item) => annoIsSent(item));
-      else if (kind === 'others') targets = list.filter((item) => item.source === 'chat' && item.sessionId !== current);
-      else targets = [];
-      const removed = runtime.store.removeMany(targets.map((item) => item.id));
-      if (removed > 0) runtime.setNotice('cleaned');
-      return removed;
-    },
-    /** Register the right-sidebar annotation tab type; safe to retry. */
-    registerAnnotationsTab() {
-      if (runtime.tabRegistered) return true;
-      let tabs = null;
-      try {
-        tabs = ctx && typeof ctx.get === 'function' ? ctx.get('sidebarRightTabs') : null;
-      } catch {
-        tabs = null;
-      }
-      if (!tabs || typeof tabs.register !== 'function') return false;
-      try {
-        const dispose = tabs.register({
-          id: ANNO_TAB_ID,
-          kind: ANNO_TAB_KIND,
-          priority: 'extension',
-          title: () => (annoIsChineseLocale(runtime) ? '标注' : 'Annotations'),
-        });
-        runtime.tabDispose = typeof dispose === 'function' ? dispose : null;
-        runtime.tabRegistered = true;
-        return true;
-      } catch (error) {
-        const message = String(error && error.message ? error.message : error);
-        if (message.includes('already registered')) {
-          runtime.tabRegistered = true;
-          return true;
-        }
-        console.warn('[annotation] sidebar tab type registration failed', error);
-        return false;
-      }
-    },
-    /** Sent document annotations are transient: drop them after the send settles. */
-    scheduleDocumentCleanup(ids) {
-      const list = Array.isArray(ids) ? ids : [];
-      const docIds = list.filter((id) => {
-        const annotation = runtime.store.find(id);
-        return annotation !== null && annotation.source === 'document';
-      });
-      if (docIds.length === 0) return;
-      window.setTimeout(() => {
-        runtime.store.removeMany(docIds);
-        runtime.repaint();
-      }, 1200);
-    },
-    /** Remove sent document annotations left over from earlier rounds. */
-    cleanupSentDocuments() {
+    /** Remove sent annotations left over from earlier rounds. */
+    cleanupSentAnnotations() {
       const ids = runtime.store.list()
-        .filter((item) => item.source === 'document' && annoIsSent(item))
+        .filter((item) => annoIsSent(item))
         .map((item) => item.id);
       return runtime.store.removeMany(ids);
     },
-    /** Open (or focus) the annotation list as a native right-sidebar tab. */
-    openAnnotationsTab() {
-      runtime.pruneDeletedSessions();
-      runtime.registerAnnotationsTab();
-      let sidebarRight = null;
-      try {
-        sidebarRight = ctx && typeof ctx.get === 'function' ? ctx.get('sidebarRight') : null;
-      } catch {
-        sidebarRight = null;
-      }
-      if (!sidebarRight || typeof sidebarRight.openTab !== 'function') return false;
-      try {
-        sidebarRight.openTab(ANNO_TAB_KIND);
-        return true;
-      } catch {
-        // A hot reload can leave the registry empty even though the body slot
-        // survived; retry registration once before reporting failure.
-        runtime.tabRegistered = false;
-        if (runtime.registerAnnotationsTab()) {
-          try {
-            sidebarRight.openTab(ANNO_TAB_KIND);
-            return true;
-          } catch {
-            return false;
-          }
-        }
-        return false;
-      }
-    },
     dispose() {
-      if (typeof runtime.tabDispose === 'function') {
+      if (typeof runtime.htmlPreview === 'function') {
         try {
-          runtime.tabDispose();
+          runtime.htmlPreview();
         } catch {
           /* ignore */
         }
       }
-      runtime.tabDispose = null;
-      runtime.tabRegistered = false;
+      runtime.htmlPreview = null;
+      runtime.htmlPreviewRegistered = false;
+      for (const entry of runtime.htmlFrames || []) {
+        if (entry.readyTimer) window.clearTimeout(entry.readyTimer);
+      }
+      runtime.htmlFrames = [];
       if (runtime.repaintTimer) window.clearTimeout(runtime.repaintTimer);
       runtime.repaintTimer = 0;
       if (runtime.noticeTimer) window.clearTimeout(runtime.noticeTimer);
@@ -1903,8 +2039,60 @@ function annoAttachEngine(runtime) {
     runtime.schedulePins();
   };
 
+  // The annotatable HTML renderer runs its own engine inside an opaque iframe
+  // and reports through this channel. The frame's document stays unreachable,
+  // so every message is re-validated against the live frame registry.
+  const onFrameMessage = (event) => {
+    const data = event && event.data;
+    if (!data || typeof data !== 'object' || data.ns !== ANNO_HTML_NS) return;
+    const entry = annoHtmlFrameForSource(runtime, event.source);
+    if (!entry) return;
+    if (data.type === 'ready') {
+      entry.ready = true;
+      if (entry.readyTimer) window.clearTimeout(entry.readyTimer);
+      entry.readyTimer = 0;
+      entry.lastPaint = '';
+      annoPaintHtmlFrames(runtime);
+      return;
+    }
+    if (data.type === 'dismiss') {
+      if (runtime.state.toolbar !== null) runtime.setToolbar(null);
+      if (runtime.state.editor !== null) runtime.setEditor(null);
+      return;
+    }
+    if (data.type === 'selection') {
+      const segment = annoNormalizeSegment(data.segment);
+      if (segment === null) return;
+      const rect = annoHtmlViewportRect(entry, data.rect);
+      if (rect === null) return;
+      const wrapper = entry.iframe.closest('[data-textpreview-url]');
+      const info = (wrapper && annoDocInfo(wrapper)) || { docKey: entry.docKey, path: entry.path };
+      if (!info || typeof info.docKey !== 'string' || info.docKey === '') return;
+      runtime.setCurrentDocument(info.docKey, info.path || undefined);
+      runtime.setToolbar({
+        source: 'document',
+        docKey: info.docKey,
+        path: info.path || undefined,
+        segments: [segment],
+        rect,
+        text: segment.exact,
+      });
+      return;
+    }
+    if (data.type === 'hit' && typeof data.id === 'string') {
+      if (runtime.store.find(data.id) === null) return;
+      const rect = annoHtmlViewportRect(entry, data.rect);
+      runtime.openEditor(data.id, rect ? { x: rect.left, y: rect.top } : null);
+      return;
+    }
+    if (data.type === 'send') {
+      if (runtime.pendingAnnotations().length > 0) runtime.sendPendingAnnotations();
+    }
+  };
+
   // Window capture runs before any element handler, so an application handler
   // that stops propagation cannot hide a selection release from the plugin.
+  listen(window, 'message', onFrameMessage, false);
   listen(window, 'pointerdown', onPointerDown, true);
   listen(window, 'pointerup', onPointerUp, true);
   listen(window, 'mousedown', onPointerDown, true);

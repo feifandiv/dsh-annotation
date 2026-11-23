@@ -108,13 +108,25 @@ const windowStub = {
 
 const registrations = [];
 const localeRegistrations = [];
+const documentPreviewRegistrations = [];
 
 const ctx = {
   effect(callback) {
     return callback();
   },
   on() {},
-  get() {
+  get(name) {
+    if (name === 'configForms') {
+      return { developerTools: { enabled: { getSnapshot: () => true, subscribe: () => () => {} } } };
+    }
+    if (name === 'documentPreviews') {
+      return {
+        register(definition) {
+          documentPreviewRegistrations.push(definition);
+          return () => {};
+        },
+      };
+    }
     return null;
   },
   locale: {
@@ -202,11 +214,15 @@ assert.equal(typeof loaded.factory, 'function', 'module must expose a factory');
 const plugin = loaded.factory(() => ReactStub);
 assert.ok(plugin && typeof plugin.apply === 'function', 'factory must return apply');
 assert.ok(Array.isArray(plugin.inject), 'factory must return an inject list');
-assert.equal(JSON.stringify(plugin.inject), JSON.stringify(['slots', 'locale', 'sessions', 'sidebarRight', 'sidebarRightTabs']));
+assert.equal(JSON.stringify(plugin.inject), JSON.stringify(['slots', 'locale', 'sessions', 'sidebarRight']));
 plugin.apply(ctx);
 
 const owners = registrations.map((entry) => entry.owner);
-assert.equal(JSON.stringify(owners.sort()), JSON.stringify(['conversation.composer.dock', 'conversation.input.overlay', 'shell.overlay', 'sidebar.footer.action', 'sidebar.right.pane.tab']));
+assert.equal(JSON.stringify(owners.sort()), JSON.stringify(['conversation.composer.dock', 'conversation.input.overlay', 'shell.overlay', 'sidebar.right.tab.document']));
+assert.equal(documentPreviewRegistrations.length, 1, 'the annotatable html renderer registers once');
+assert.equal(JSON.stringify(documentPreviewRegistrations[0].extensions), JSON.stringify(['html', 'htm']));
+assert.equal(documentPreviewRegistrations[0].priority, 'extension');
+assert.equal(documentPreviewRegistrations[0].loading, 'bytes-complete');
 const overlay = registrations.find((entry) => entry.owner === 'shell.overlay');
 assert.equal(typeof overlay.component, 'function');
 assert.equal(typeof overlay.options.inject, 'function');
@@ -255,19 +271,12 @@ runtime.setEditor({ id: committed.id, anchor: null });
 assert.doesNotThrow(() => renderNode(overlay.component({ runtime, t, useSessions: null })), 'overlay with editor must not throw');
 assert.ok(runtime.state.editor && runtime.state.editor.id === committed.id, 'editor state is renderable');
 runtime.state.toolbar = payload;
-runtime.state.panel = { rect: { left: 20, top: 600, right: 40, bottom: 620, width: 20, height: 20 } };
 runtime.state.notice = 'copied';
-assert.doesNotThrow(() => renderNode(overlay.component({ runtime, t, useSessions: null })), 'overlay with toolbar/panel/notice must not throw');
+assert.doesNotThrow(() => renderNode(overlay.component({ runtime, t, useSessions: null })), 'overlay with toolbar/notice must not throw');
 const pendingRegistration = registrations.find((entry) => entry.owner === 'conversation.input.overlay');
 assert.doesNotThrow(() => renderNode(pendingRegistration.component({ runtime, t })), 'pending card render must not throw');
-const sidebarRegistration = registrations.find((entry) => entry.owner === 'sidebar.right.pane.tab');
-assert.doesNotThrow(() => renderNode(sidebarRegistration.component({ runtime, t })), 'sidebar list render must not throw');
-const footerRegistration = registrations.find((entry) => entry.owner === 'sidebar.footer.action');
-assert.doesNotThrow(() => renderNode(footerRegistration.component({ runtime, t, wide: true })), 'footer action render must not throw');
-assert.doesNotThrow(() => renderNode(footerRegistration.component({ runtime, t, wide: false })), 'rail footer action render must not throw');
 runtime.state.toolbar = null;
 runtime.state.editor = null;
-runtime.state.panel = null;
 runtime.state.notice = null;
 assert.doesNotThrow(() => renderNode(overlay.component({ runtime, t, useSessions: null })), 'overlay empty render must not throw');
 const probe = sandbox.window.__dshAnnotation.probe();

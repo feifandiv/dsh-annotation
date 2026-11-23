@@ -344,6 +344,26 @@ test('builds the agent message from quotes, locations and notes', () => {
   assert.match(en, /Quote:/);
 });
 
+test('numbers only open documents and unsent rows, starting at one', () => {
+  const list = [
+    { id: 'd-closed', source: 'document', docKey: 'doc-closed', createdAt: 1 },
+    { id: 'c-other', source: 'chat', sessionId: 's-2', createdAt: 2 },
+    { id: 'd-open', source: 'document', docKey: 'doc-open', createdAt: 3 },
+    { id: 'c-first', source: 'chat', sessionId: 's-1', createdAt: 4 },
+    { id: 'c-sent', source: 'chat', sessionId: 's-1', createdAt: 5, sentAt: 6, updatedAt: 6 },
+  ];
+  const visible = annoVisibleAnnotations(list, { sessionId: 's-1', openDocs: [{ docKey: 'doc-open' }] });
+  assert.equal(visible.count, 2);
+  assert.equal(visible.numbers.get('d-open'), 1);
+  assert.equal(visible.numbers.get('c-first'), 2);
+  assert.equal(visible.numbers.has('d-closed'), false);
+  assert.equal(visible.numbers.has('c-other'), false);
+  assert.equal(visible.numbers.has('c-sent'), false);
+  const chatOnly = annoVisibleAnnotations(list, { sessionId: 's-1', openDocs: [] });
+  assert.equal(chatOnly.count, 1);
+  assert.equal(chatOnly.numbers.get('c-first'), 1);
+});
+
 test('scopes visible annotations and numbers them consistently', () => {
   const list = [
     { id: 'c-new', source: 'chat', sessionId: 's-1', createdAt: 30 },
@@ -351,7 +371,7 @@ test('scopes visible annotations and numbers them consistently', () => {
     { id: 'd-1', source: 'document', docKey: 'doc-1', createdAt: 10 },
     { id: 'c-old', source: 'chat', sessionId: 's-1', createdAt: 20 },
   ];
-  const visible = annoVisibleAnnotations(list, { sessionId: 's-1' });
+  const visible = annoVisibleAnnotations(list, { sessionId: 's-1', openDocs: [{ docKey: 'doc-1' }] });
   assert.equal(visible.count, 3);
   assert.deepEqual(visible.chat.map((item) => item.id), ['c-old', 'c-new']);
   assert.deepEqual(visible.documents.map((item) => item.id), ['d-1']);
