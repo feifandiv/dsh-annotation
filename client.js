@@ -386,7 +386,9 @@ function annoPendingAnnotations(list, options) {
     const byPath = annoPathIsAbsolute(item.path) && docPaths.has(item.path);
     if (byKey || byPath) out.push(item);
   }
-  return out;
+  // The store prepends new records, so `list` arrives newest first. Numbering,
+  // the pending card and the agent message all follow selection order instead.
+  return out.sort(annoCreatedOrder);
 }
 
 /** Stamp annotations as sent at the given time. Returns a new list. */
