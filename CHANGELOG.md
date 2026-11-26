@@ -4,13 +4,10 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.5.1] - 2026-11-26
 
 ### Fixed
-- Pending annotations were numbered, shown and sent to the agent in reverse
-  selection order, because the store keeps the newest record first. They now
-  follow creation order, so quoted replies come back in the order the passages
-  were selected.
+- Pending annotations are sent in creation order (contributed by @log-li).
 
 ## [2.5.0] - 2026-11-13
 
