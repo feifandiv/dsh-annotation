@@ -22,9 +22,6 @@ const ANNO_COLORS = ['yellow', 'green', 'blue', 'pink'];
 /** localStorage key holding every annotation of this profile. */
 const ANNO_STORAGE_KEY = 'dsh.annotation.v1';
 
-/** localStorage key remembering how a batch should be sent. */
-const ANNO_PROMPT_MODE_KEY = 'dsh.annotation.promptMode';
-
 /** Persisted-envelope version; bump only when the stored shape changes. */
 const ANNO_STORE_VERSION = 1;
 
@@ -407,30 +404,20 @@ function annoMarkSent(list, ids, now) {
 }
 
 /**
- * Normalize a send mode. Anything but the explicit `edit` value is the default
- * `discuss`, so an unknown or missing stored value can never push edits.
- */
-function annoNormalizePromptMode(mode) {
-  return mode === 'edit' ? 'edit' : 'discuss';
-}
-
-/**
  * Compose the message the agent receives for a batch of annotations.
  * Quotes carry the exact selected text; document records also carry the path
  * the agent can open, so it can act on the right file.
  *
- * `mode` decides the posture of the batch: `discuss` (default) asks for answers
- * and leaves editing to notes that explicitly request it; `edit` keeps the
- * original directive to process the notes and edit the referenced documents.
+ * Each note carries its own intent — a question is answered, a problem or a
+ * requested change is edited — so a batch may mix both without a mode switch.
  */
 function annoBuildAgentPrompt(list, options) {
   const opts = options || {};
   const zh = opts.zh !== false;
-  const mode = annoNormalizePromptMode(opts.mode);
   const copy = zh ? ANNO_ZH : ANNO_EN;
   const items = Array.isArray(list) ? list : [];
   const lines = [];
-  lines.push(copy['prompt.open.' + mode].replace('{n}', String(items.length)));
+  lines.push(copy['prompt.open'].replace('{n}', String(items.length)));
   lines.push('');
   let index = 0;
   for (const item of items) {
@@ -444,15 +431,15 @@ function annoBuildAgentPrompt(list, options) {
     if (zh) {
       lines.push(`${index}. 原文：「${quote}」`);
       lines.push(`   位置：${where}`);
-      lines.push(`   批注：${note === '' ? copy['prompt.noteEmpty.' + mode] : note}`);
+      lines.push(`   批注：${note === '' ? copy['prompt.noteEmpty'] : note}`);
     } else {
       lines.push(`${index}. Quote: "${quote}"`);
       lines.push(`   Location: ${where}`);
-      lines.push(`   Note: ${note === '' ? copy['prompt.noteEmpty.' + mode] : note}`);
+      lines.push(`   Note: ${note === '' ? copy['prompt.noteEmpty'] : note}`);
     }
   }
   lines.push('');
-  lines.push(copy['prompt.closing.' + mode]);
+  lines.push(copy['prompt.closing']);
   return lines.join('\n');
 }
 
@@ -1562,24 +1549,6 @@ function annoLocalStorage() {
     return window.localStorage;
   } catch {
     return null;
-  }
-}
-
-/** Read the remembered send mode; `discuss` is the safe default. */
-function annoReadPromptMode() {
-  try {
-    return annoNormalizePromptMode(window.localStorage.getItem(ANNO_PROMPT_MODE_KEY));
-  } catch {
-    return 'discuss';
-  }
-}
-
-/** Persist the send mode chosen for the next batch. */
-function annoWritePromptMode(mode) {
-  try {
-    window.localStorage.setItem(ANNO_PROMPT_MODE_KEY, annoNormalizePromptMode(mode));
-  } catch {
-    /* storage may be unavailable */
   }
 }
 
@@ -2875,7 +2844,6 @@ function annoCreateRuntime(ctx) {
       currentDocPath: null,
       openDocs: [],
       notice: null,
-      promptMode: annoReadPromptMode(),
       pins: [],
     },
     paintedRanges: new Map(),
@@ -2943,16 +2911,6 @@ function annoCreateRuntime(ctx) {
         docPaths: docs.map((entry) => entry.path).filter(Boolean),
       });
     },
-    promptMode() {
-      return annoNormalizePromptMode(runtime.state.promptMode);
-    },
-    setPromptMode(mode) {
-      const next = annoNormalizePromptMode(mode);
-      if (runtime.state.promptMode === next) return;
-      runtime.state.promptMode = next;
-      annoWritePromptMode(next);
-      runtime.notify();
-    },
     sendPendingAnnotations() {
       const pending = runtime.pendingAnnotations();
       if (pending.length === 0) {
@@ -2960,7 +2918,7 @@ function annoCreateRuntime(ctx) {
         return false;
       }
       const zh = annoIsChineseLocale(runtime);
-      const text = annoBuildAgentPrompt(pending, { zh: zh, mode: runtime.promptMode() });
+      const text = annoBuildAgentPrompt(pending, { zh: zh });
       const ids = pending.map((item) => item.id);
       runtime.setEditor(null);
       runtime.setToolbar(null);
@@ -4060,11 +4018,6 @@ function AnnoPendingCard(props) {
   const [open, setOpen] = React.useState(false);
   const pending = runtime.pendingAnnotations();
   if (pending.length === 0) return null;
-  const mode = runtime.promptMode();
-  const modes = [
-    { id: 'discuss', label: t('pending.mode.discuss'), hint: t('pending.mode.discussHint') },
-    { id: 'edit', label: t('pending.mode.edit'), hint: t('pending.mode.editHint') },
-  ];
   const numbers = annoVisibleAnnotations(runtime.store.list(), {
     sessionId: runtime.state.currentSessionId,
     openDocs: runtime.state.openDocs || [],
@@ -4119,25 +4072,6 @@ function AnnoPendingCard(props) {
         h(AnnoIcon, { name: 'note', size: 14 }),
         h('span', { className: 'anno-pending-label' }, t('pending.count', { n: pending.length })),
         h(AnnoIcon, { name: open ? 'chevron-down' : 'chevron-up', size: 13 }),
-      ),
-      h(
-        'div',
-        { className: 'anno-pending-mode', role: 'group', 'aria-label': t('pending.mode.aria') },
-        modes.map((entry) =>
-          h(
-            'button',
-            {
-              key: entry.id,
-              type: 'button',
-              className:
-                'anno-pending-mode-btn' + (mode === entry.id ? ' is-active' : ''),
-              'aria-pressed': mode === entry.id ? 'true' : 'false',
-              title: entry.hint,
-              onClick: () => runtime.setPromptMode(entry.id),
-            },
-            entry.label,
-          ),
-        ),
       ),
       h(
         'button',
@@ -4257,7 +4191,7 @@ function AnnoSendBridge(props) {
       if (pendingNow.length === 0) return;
       event.preventDefault();
       event.stopPropagation();
-      const prompt = annoBuildAgentPrompt(pendingNow, { zh: annoIsChineseLocale(runtime), mode: runtime.promptMode() });
+      const prompt = annoBuildAgentPrompt(pendingNow, { zh: annoIsChineseLocale(runtime) });
       const combined = current.replace(/\s+$/, '') + '\n\n' + prompt;
       const ids = pendingNow.map((item) => item.id);
       sendingRef.current = true;
@@ -4306,7 +4240,7 @@ function AnnoSendBridge(props) {
       if (primary && primary.disabled) return;
       event.preventDefault();
       event.stopPropagation();
-      const prompt = annoBuildAgentPrompt(pendingNow, { zh: annoIsChineseLocale(runtime), mode: runtime.promptMode() });
+      const prompt = annoBuildAgentPrompt(pendingNow, { zh: annoIsChineseLocale(runtime) });
       const combined = current.replace(/\s+$/, '') + '\n\n' + prompt;
       const ids = pendingNow.map((item) => item.id);
       sendingRef.current = true;
@@ -4435,10 +4369,6 @@ function annoPluginCss() {
     '.anno-pending-toggle{flex:1;display:flex;align-items:center;gap:7px;min-width:0;padding:4px 6px;border:none;border-radius:8px;background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;text-align:left;cursor:pointer;}',
     '.anno-pending-toggle:hover{background:color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent);}',
     '.anno-pending-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-    '.anno-pending-mode{flex:none;display:flex;align-items:center;gap:1px;padding:2px;border-radius:8px;background:color-mix(in srgb, var(--dsw-alias-label-primary) 7%, transparent);}',
-    '.anno-pending-mode-btn{padding:2px 6px;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);font-family:inherit;font-size:10.5px;line-height:16px;cursor:pointer;}',
-    '.anno-pending-mode-btn:hover{color:var(--dsw-alias-label-primary);}',
-    '.anno-pending-mode-btn.is-active{background:color-mix(in srgb, var(--dsw-alias-brand-primary) 16%, transparent);color:var(--dsw-alias-brand-primary);}',
     '.anno-pending-send{flex:none;padding:4px 8px;border:none;border-radius:8px;background:var(--dsw-alias-button-info-fill);color:#fff;font-family:inherit;font-size:11px;cursor:pointer;}',
     '.anno-pending-send:hover{background:var(--dsw-alias-button-info-hover);}',
     '.anno-pending-body{margin-top:2px;border-top:0.5px solid var(--dsw-alias-border-l1);padding-top:2px;max-height:220px;overflow-y:auto;}',
@@ -4476,17 +4406,9 @@ const ANNO_ZH = {
   "pending.count": "{n} 条注释",
   "pending.send": "发送全部",
   "pending.hint": "⌘/Ctrl+Enter 发送全部给 AI",
-  "pending.mode.aria": "发送方式",
-  "pending.mode.discuss": "探讨",
-  "pending.mode.edit": "修改",
-  "pending.mode.discussHint": "逐条回答批注；只有批注明确要求修改对应文件时才改",
-  "pending.mode.editHint": "按批注直接修改对应文件",
-  "prompt.open.discuss": "我针对下面 {n} 处具体内容做了标注：",
-  "prompt.open.edit": "我针对下面 {n} 处具体内容做了标注，请逐条查看并处理或修改：",
-  "prompt.closing.discuss": "逐条回答我的批注；只有批注明确要求修改对应文件时才改。",
-  "prompt.closing.edit": "请先用上面的原文定位到具体位置；文档类标注请直接修改对应文件，改完简要说明每处做了什么。",
-  "prompt.noteEmpty.discuss": "（无，请按原文位置回答）",
-  "prompt.noteEmpty.edit": "（无，请按原文位置处理）",
+  "prompt.open": "我针对下面 {n} 处具体内容做了标注：",
+  "prompt.closing": "逐条按批注的意图处理：提问或讨论的直接回答；指出问题、要求修改或给出替代写法的，直接修改对应文件并简要说明。",
+  "prompt.noteEmpty": "（无，请按原文位置回答）",
   "panel.title": "标注",
   "panel.delete": "删除",
   "panel.count.empty": "暂无",
@@ -4520,17 +4442,9 @@ const ANNO_EN = {
   "pending.count": "{n} notes",
   "pending.send": "Send all",
   "pending.hint": "Cmd/Ctrl+Enter sends everything to the AI",
-  "pending.mode.aria": "Send mode",
-  "pending.mode.discuss": "Discuss",
-  "pending.mode.edit": "Edit",
-  "pending.mode.discussHint": "Answer each note; edit files only when a note asks for it",
-  "pending.mode.editHint": "Edit the referenced files as the notes ask",
-  "prompt.open.discuss": "I annotated {n} specific places below:",
-  "prompt.open.edit": "I annotated {n} specific places below. Please review and act on each one:",
-  "prompt.closing.discuss": "Answer each note; edit the referenced file only when a note explicitly asks for an edit.",
-  "prompt.closing.edit": "Locate each place by the quoted text first; for document annotations edit the referenced file and briefly summarize each change.",
-  "prompt.noteEmpty.discuss": "(none; answer about the quoted text)",
-  "prompt.noteEmpty.edit": "(none; act on the quoted text)",
+  "prompt.open": "I annotated {n} specific places below:",
+  "prompt.closing": "Handle each note by its intent: answer questions and discussion; when a note points out a problem, asks for a change, or gives replacement wording, edit the referenced file and briefly summarize the change.",
+  "prompt.noteEmpty": "(none; answer about the quoted text)",
   "panel.title": "Annotations",
   "panel.delete": "Delete",
   "panel.count.empty": "None",
@@ -4826,7 +4740,7 @@ function annoApply(ctx) {
   // state from DevTools without hunting through internal objects.
   ctx.effect(() => {
     const handle = {
-      version: '2.6.0',
+      version: '2.6.1',
       runtime,
       state: () => runtime.state,
       annotations: () => runtime.store.list(),

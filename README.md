@@ -28,7 +28,7 @@ flowchart LR
 | `Cmd/Ctrl + C` with no text selected in the comment box | Copies the passage that opened the box (focusing the box collapses the document selection) |
 | `Esc` | Cancels the comment box |
 | Click the "N notes" card | Expands the quotes and notes; jump to or delete each one |
-| Click 探讨 / 修改 in the card | Chooses how the batch is sent: 探讨 (default) asks for answers; 修改 asks for edits. The choice is remembered |
+| Write a question or an edit request in the note | The closing asks the agent to judge each note by its intent: questions get answers, problems or requested changes get edits |
 | Send with text already in the composer | The typed message and all pending annotations go to the AI as one message (attachments preserved) |
 | Click a numbered dot / highlighted text | Edit or delete that annotation; the number matches the aggregation card |
 
@@ -39,12 +39,12 @@ I annotated 2 specific places below:
 
 1. Quote: "…"
    Location: conversation reply
-   Note: …
+   Note: What does this paragraph mean?
 2. Quote: "…"
    Location: `docs/report.md`
-   Note: …
+   Note: Make this shorter.
 
-Answer each note; edit the referenced file only when a note explicitly asks for an edit.
+Handle each note by its intent: answer questions and discussion; when a note points out a problem, asks for a change, or gives replacement wording, edit the referenced file and briefly summarize the change.
 ```
 
 The message language follows the current DSH UI language. On a successful send the batch leaves the page and storage at once: the message itself carries every quote and note, so no local backup is kept.

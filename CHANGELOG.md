@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/).
 
+## [2.6.1] - 2026-11-26
+
+### Fixed
+- A batch that mixed a question with an edit request could not be expressed:
+  the per-send switch forced one posture on every note. The closing now judges
+  each note by its own intent, so mixed batches work without a switch.
+
+### Removed
+- The 探讨 / 修改 switch on the pending-annotations card. The card is back to
+  "N notes + Send all"; the note itself carries the intent — a question is
+  answered, a problem or a requested change is edited.
+
 ## [2.6.0] - 2026-11-26
 
 ### Added
