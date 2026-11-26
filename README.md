@@ -28,13 +28,14 @@ flowchart LR
 | `Cmd/Ctrl + C` with no text selected in the comment box | Copies the passage that opened the box (focusing the box collapses the document selection) |
 | `Esc` | Cancels the comment box |
 | Click the "N notes" card | Expands the quotes and notes; jump to or delete each one |
+| Click 探讨 / 修改 in the card | Chooses how the batch is sent: 探讨 (default) asks for answers; 修改 asks for edits. The choice is remembered |
 | Send with text already in the composer | The typed message and all pending annotations go to the AI as one message (attachments preserved) |
 | Click a numbered dot / highlighted text | Edit or delete that annotation; the number matches the aggregation card |
 
 The message the AI receives looks like this:
 
 ```text
-I annotated 2 specific places below. Please review and act on each one:
+I annotated 2 specific places below:
 
 1. Quote: "…"
    Location: conversation reply
@@ -42,6 +43,8 @@ I annotated 2 specific places below. Please review and act on each one:
 2. Quote: "…"
    Location: `docs/report.md`
    Note: …
+
+Answer each note; edit the referenced file only when a note explicitly asks for an edit.
 ```
 
 The message language follows the current DSH UI language. On a successful send the batch leaves the page and storage at once: the message itself carries every quote and note, so no local backup is kept.
@@ -107,7 +110,7 @@ Uninstall through Plugin Manager; annotations stay in `localStorage`.
 
 ```bash
 node build.mjs                 # generate client.js
-node --test test/core.test.mjs # 21 pure-logic tests
+node --test test/core.test.mjs # 24 pure-logic tests
 node test/smoke.mjs            # bundle load + slot registration + component render smoke test
 node --test test/html.test.mjs # HTML address, asset inlining and bridge serialization
 node tools/validate.mjs        # manifest/locale/icon/bundle validation

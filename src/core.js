@@ -7,11 +7,16 @@
  * is the part most worth testing without a browser.
  */
 
+import { ANNO_EN, ANNO_ZH } from './strings.js';
+
 /** Highlight colors, in toolbar order. Each maps to a theme token in CSS. */
 export const ANNO_COLORS = ['yellow', 'green', 'blue', 'pink'];
 
 /** localStorage key holding every annotation of this profile. */
 export const ANNO_STORAGE_KEY = 'dsh.annotation.v1';
+
+/** localStorage key remembering how a batch should be sent. */
+export const ANNO_PROMPT_MODE_KEY = 'dsh.annotation.promptMode';
 
 /** Persisted-envelope version; bump only when the stored shape changes. */
 export const ANNO_STORE_VERSION = 1;
@@ -395,20 +400,30 @@ export function annoMarkSent(list, ids, now) {
 }
 
 /**
+ * Normalize a send mode. Anything but the explicit `edit` value is the default
+ * `discuss`, so an unknown or missing stored value can never push edits.
+ */
+export function annoNormalizePromptMode(mode) {
+  return mode === 'edit' ? 'edit' : 'discuss';
+}
+
+/**
  * Compose the message the agent receives for a batch of annotations.
  * Quotes carry the exact selected text; document records also carry the path
  * the agent can open, so it can act on the right file.
+ *
+ * `mode` decides the posture of the batch: `discuss` (default) asks for answers
+ * and leaves editing to notes that explicitly request it; `edit` keeps the
+ * original directive to process the notes and edit the referenced documents.
  */
 export function annoBuildAgentPrompt(list, options) {
   const opts = options || {};
   const zh = opts.zh !== false;
+  const mode = annoNormalizePromptMode(opts.mode);
+  const copy = zh ? ANNO_ZH : ANNO_EN;
   const items = Array.isArray(list) ? list : [];
   const lines = [];
-  lines.push(
-    zh
-      ? `我针对下面 ${items.length} 处具体内容做了标注，请逐条查看并处理或修改：`
-      : `I annotated ${items.length} specific places below. Please review and act on each one:`,
-  );
+  lines.push(copy['prompt.open.' + mode].replace('{n}', String(items.length)));
   lines.push('');
   let index = 0;
   for (const item of items) {
@@ -422,19 +437,15 @@ export function annoBuildAgentPrompt(list, options) {
     if (zh) {
       lines.push(`${index}. 原文：「${quote}」`);
       lines.push(`   位置：${where}`);
-      lines.push(`   批注：${note === '' ? '（无，请按原文位置处理）' : note}`);
+      lines.push(`   批注：${note === '' ? copy['prompt.noteEmpty.' + mode] : note}`);
     } else {
       lines.push(`${index}. Quote: "${quote}"`);
       lines.push(`   Location: ${where}`);
-      lines.push(`   Note: ${note === '' ? '(none; act on the quoted text)' : note}`);
+      lines.push(`   Note: ${note === '' ? copy['prompt.noteEmpty.' + mode] : note}`);
     }
   }
   lines.push('');
-  lines.push(
-    zh
-      ? '请先用上面的原文定位到具体位置；文档类标注请直接修改对应文件，改完简要说明每处做了什么。'
-      : 'Locate each place by the quoted text first; for document annotations edit the referenced file and briefly summarize each change.',
-  );
+  lines.push(copy['prompt.closing.' + mode]);
   return lines.join('\n');
 }
 

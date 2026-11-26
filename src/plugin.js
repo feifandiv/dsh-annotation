@@ -274,7 +274,7 @@ function annoApply(ctx) {
   // state from DevTools without hunting through internal objects.
   ctx.effect(() => {
     const handle = {
-      version: '2.5.1',
+      version: '2.6.0',
       runtime,
       state: () => runtime.state,
       annotations: () => runtime.store.list(),

@@ -72,6 +72,24 @@ function annoLocalStorage() {
   }
 }
 
+/** Read the remembered send mode; `discuss` is the safe default. */
+function annoReadPromptMode() {
+  try {
+    return annoNormalizePromptMode(window.localStorage.getItem(ANNO_PROMPT_MODE_KEY));
+  } catch {
+    return 'discuss';
+  }
+}
+
+/** Persist the send mode chosen for the next batch. */
+function annoWritePromptMode(mode) {
+  try {
+    window.localStorage.setItem(ANNO_PROMPT_MODE_KEY, annoNormalizePromptMode(mode));
+  } catch {
+    /* storage may be unavailable */
+  }
+}
+
 /** Opt-in compatibility flag: hide a third-party sidebar's selection button. */
 const ANNO_HIDE_FOREIGN_POPUP_KEY = 'dsh.annotation.hideForeignSelectionPopup';
 
@@ -1364,6 +1382,7 @@ function annoCreateRuntime(ctx) {
       currentDocPath: null,
       openDocs: [],
       notice: null,
+      promptMode: annoReadPromptMode(),
       pins: [],
     },
     paintedRanges: new Map(),
@@ -1431,6 +1450,16 @@ function annoCreateRuntime(ctx) {
         docPaths: docs.map((entry) => entry.path).filter(Boolean),
       });
     },
+    promptMode() {
+      return annoNormalizePromptMode(runtime.state.promptMode);
+    },
+    setPromptMode(mode) {
+      const next = annoNormalizePromptMode(mode);
+      if (runtime.state.promptMode === next) return;
+      runtime.state.promptMode = next;
+      annoWritePromptMode(next);
+      runtime.notify();
+    },
     sendPendingAnnotations() {
       const pending = runtime.pendingAnnotations();
       if (pending.length === 0) {
@@ -1438,7 +1467,7 @@ function annoCreateRuntime(ctx) {
         return false;
       }
       const zh = annoIsChineseLocale(runtime);
-      const text = annoBuildAgentPrompt(pending, { zh: zh });
+      const text = annoBuildAgentPrompt(pending, { zh: zh, mode: runtime.promptMode() });
       const ids = pending.map((item) => item.id);
       runtime.setEditor(null);
       runtime.setToolbar(null);

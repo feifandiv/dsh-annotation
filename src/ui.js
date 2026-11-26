@@ -384,6 +384,11 @@ function AnnoPendingCard(props) {
   const [open, setOpen] = React.useState(false);
   const pending = runtime.pendingAnnotations();
   if (pending.length === 0) return null;
+  const mode = runtime.promptMode();
+  const modes = [
+    { id: 'discuss', label: t('pending.mode.discuss'), hint: t('pending.mode.discussHint') },
+    { id: 'edit', label: t('pending.mode.edit'), hint: t('pending.mode.editHint') },
+  ];
   const numbers = annoVisibleAnnotations(runtime.store.list(), {
     sessionId: runtime.state.currentSessionId,
     openDocs: runtime.state.openDocs || [],
@@ -438,6 +443,25 @@ function AnnoPendingCard(props) {
         h(AnnoIcon, { name: 'note', size: 14 }),
         h('span', { className: 'anno-pending-label' }, t('pending.count', { n: pending.length })),
         h(AnnoIcon, { name: open ? 'chevron-down' : 'chevron-up', size: 13 }),
+      ),
+      h(
+        'div',
+        { className: 'anno-pending-mode', role: 'group', 'aria-label': t('pending.mode.aria') },
+        modes.map((entry) =>
+          h(
+            'button',
+            {
+              key: entry.id,
+              type: 'button',
+              className:
+                'anno-pending-mode-btn' + (mode === entry.id ? ' is-active' : ''),
+              'aria-pressed': mode === entry.id ? 'true' : 'false',
+              title: entry.hint,
+              onClick: () => runtime.setPromptMode(entry.id),
+            },
+            entry.label,
+          ),
+        ),
       ),
       h(
         'button',
@@ -557,7 +581,7 @@ function AnnoSendBridge(props) {
       if (pendingNow.length === 0) return;
       event.preventDefault();
       event.stopPropagation();
-      const prompt = annoBuildAgentPrompt(pendingNow, { zh: annoIsChineseLocale(runtime) });
+      const prompt = annoBuildAgentPrompt(pendingNow, { zh: annoIsChineseLocale(runtime), mode: runtime.promptMode() });
       const combined = current.replace(/\s+$/, '') + '\n\n' + prompt;
       const ids = pendingNow.map((item) => item.id);
       sendingRef.current = true;
@@ -606,7 +630,7 @@ function AnnoSendBridge(props) {
       if (primary && primary.disabled) return;
       event.preventDefault();
       event.stopPropagation();
-      const prompt = annoBuildAgentPrompt(pendingNow, { zh: annoIsChineseLocale(runtime) });
+      const prompt = annoBuildAgentPrompt(pendingNow, { zh: annoIsChineseLocale(runtime), mode: runtime.promptMode() });
       const combined = current.replace(/\s+$/, '') + '\n\n' + prompt;
       const ids = pendingNow.map((item) => item.id);
       sendingRef.current = true;
@@ -735,6 +759,10 @@ function annoPluginCss() {
     '.anno-pending-toggle{flex:1;display:flex;align-items:center;gap:7px;min-width:0;padding:4px 6px;border:none;border-radius:8px;background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;text-align:left;cursor:pointer;}',
     '.anno-pending-toggle:hover{background:color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent);}',
     '.anno-pending-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.anno-pending-mode{flex:none;display:flex;align-items:center;gap:1px;padding:2px;border-radius:8px;background:color-mix(in srgb, var(--dsw-alias-label-primary) 7%, transparent);}',
+    '.anno-pending-mode-btn{padding:2px 6px;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);font-family:inherit;font-size:10.5px;line-height:16px;cursor:pointer;}',
+    '.anno-pending-mode-btn:hover{color:var(--dsw-alias-label-primary);}',
+    '.anno-pending-mode-btn.is-active{background:color-mix(in srgb, var(--dsw-alias-brand-primary) 16%, transparent);color:var(--dsw-alias-brand-primary);}',
     '.anno-pending-send{flex:none;padding:4px 8px;border:none;border-radius:8px;background:var(--dsw-alias-button-info-fill);color:#fff;font-family:inherit;font-size:11px;cursor:pointer;}',
     '.anno-pending-send:hover{background:var(--dsw-alias-button-info-hover);}',
     '.anno-pending-body{margin-top:2px;border-top:0.5px solid var(--dsw-alias-border-l1);padding-top:2px;max-height:220px;overflow-y:auto;}',

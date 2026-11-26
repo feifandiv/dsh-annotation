@@ -28,13 +28,14 @@ flowchart LR
 | 评论框内没选中文字时按 `Cmd/Ctrl + C` | 复制最初选中的原文（评论框聚焦会折叠文档选区） |
 | `Esc` | 取消评论框 |
 | 点输入框上方的「N 条注释」卡片 | 展开查看每条标注的原文和评论，可点击跳转或删除 |
+| 点卡片上的「探讨 / 修改」 | 选本批标注的发送方式：探讨（默认）让 AI 逐条回答；修改让它按批注改对应文件。选择会被记住 |
 | 输入框已有文字时点发送 | 输入框文字 + 全部待发送标注合并成一条消息发给 AI（附件保留） |
 | 点文字旁的编号圆点 / 高亮文字 | 编辑这条标注的评论，或删除；编号与聚合卡里的编号一致 |
 
 发给 AI 的消息形如：
 
 ```text
-我针对下面 2 处具体内容做了标注，请逐条查看并处理或修改：
+我针对下面 2 处具体内容做了标注：
 
 1. 原文：「……」
    位置：对话回复正文
@@ -42,6 +43,8 @@ flowchart LR
 2. 原文：「……」
    位置：`docs/report.md`
    批注：……
+
+逐条回答我的批注；只有批注明确要求修改对应文件时才改。
 ```
 
 消息语言跟随当前 DSH 界面语言。发送成功后本轮标注会立即从页面和存储里移除——发给 AI 的那条消息本身就带着每处原文和批注，不需要再在本地留一份备份。
@@ -107,7 +110,7 @@ dsh plugin --profile <profile> add @fanfan4589/dsh-annotation
 
 ```bash
 node build.mjs                 # 生成 client.js
-node --test test/core.test.mjs # 21 个纯逻辑用例
+node --test test/core.test.mjs # 24 个纯逻辑用例
 node test/smoke.mjs            # 产物加载 + 槽位注册 + 组件渲染冒烟
 node --test test/html.test.mjs # HTML 地址、资产内联与桥接序列化
 node tools/validate.mjs        # manifest/locale/icon/产物校验

@@ -22,6 +22,7 @@ import {
   annoMarkSent,
   annoPendingAnnotations,
   annoBuildAgentPrompt,
+  annoNormalizePromptMode,
   annoQuotePreview,
   annoReadStore,
   annoRemove,
@@ -364,6 +365,36 @@ test('builds the agent message from quotes, locations and notes', () => {
   const en = annoBuildAgentPrompt([chat], { zh: false });
   assert.match(en, /1 specific places/);
   assert.match(en, /Quote:/);
+});
+
+test('defaults the agent prompt to the discuss closing', () => {
+  const annotation = annoNormalizeAnnotation(makeChatAnnotation({ id: 'mode-default' }));
+  const zh = annoBuildAgentPrompt([annotation], { zh: true });
+  assert.match(zh, /逐条回答我的批注；只有批注明确要求修改对应文件时才改。/);
+  assert.doesNotMatch(zh, /请直接修改对应文件/);
+  const en = annoBuildAgentPrompt([annotation], { zh: false });
+  assert.match(
+    en,
+    /Answer each note; edit the referenced file only when a note explicitly asks for an edit\./,
+  );
+  assert.equal(annoNormalizePromptMode(undefined), 'discuss');
+  assert.equal(annoNormalizePromptMode('bogus'), 'discuss');
+  assert.equal(annoNormalizePromptMode('edit'), 'edit');
+});
+
+test('switching mode changes the agent prompt closing', () => {
+  const annotation = annoNormalizeAnnotation(makeChatAnnotation({ id: 'mode-switch', note: '' }));
+  const discuss = annoBuildAgentPrompt([annotation], { zh: true, mode: 'discuss' });
+  const edit = annoBuildAgentPrompt([annotation], { zh: true, mode: 'edit' });
+  assert.notEqual(discuss, edit);
+  assert.match(discuss, /逐条回答我的批注；只有批注明确要求修改对应文件时才改。/);
+  assert.match(discuss, /（无，请按原文位置回答）/);
+  assert.match(edit, /文档类标注请直接修改对应文件，改完简要说明每处做了什么。/);
+  assert.match(edit, /（无，请按原文位置处理）/);
+  assert.doesNotMatch(edit, /逐条回答我的批注/);
+  const enEdit = annoBuildAgentPrompt([annotation], { zh: false, mode: 'edit' });
+  assert.match(enEdit, /for document annotations edit the referenced file/);
+  assert.match(enEdit, /\(none; act on the quoted text\)/);
 });
 
 test('numbers only open documents and unsent rows, starting at one', () => {

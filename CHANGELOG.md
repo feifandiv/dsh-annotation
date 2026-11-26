@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/).
 
+## [2.6.0] - 2026-11-26
+
+### Added
+- A per-send 探讨 / 修改 (Discuss / Edit) switch on the pending-annotations
+  card. The choice is remembered and is applied to the closing wording of the
+  message that will be sent.
+- `annoBuildAgentPrompt` takes `mode: 'discuss' | 'edit'`; the Chinese and
+  English prompt copy lives in `src/strings.js` with the other UI strings.
+
+### Changed
+- The default closing now asks for answers: the agent answers each note and
+  edits the referenced file only when a note explicitly asks for an edit. The
+  previous "process or edit" closing is still available through 修改 / Edit.
+
 ## [2.5.1] - 2026-11-26
 
 ### Fixed
