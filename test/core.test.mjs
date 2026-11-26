@@ -316,6 +316,28 @@ test('tracks pending annotations across chat and open documents', () => {
   assert.equal(annoPendingAnnotations(marked, { sessionId: 's-1', docKeys: [doc.docKey], docPaths: [doc.path] }).length, 0);
 });
 
+test('keeps pending annotations in creation order, not storage order', () => {
+  // The store prepends each new record, so its list reads newest first.
+  const make = (id, createdAt, note) => annoNormalizeAnnotation({
+    id,
+    source: 'chat',
+    sessionId: 's-1',
+    color: 'yellow',
+    note,
+    createdAt,
+    segments: [annoBuildSegment(TEXT, 0, 4, { anchorKey: id })],
+  });
+  const newest = make('c-new', 3000, 'third');
+  const middle = make('c-mid', 2000, 'second');
+  const oldest = make('c-old', 1000, 'first');
+  const pending = annoPendingAnnotations([newest, middle, oldest], { sessionId: 's-1' });
+  assert.deepEqual(pending.map((item) => item.id), ['c-old', 'c-mid', 'c-new']);
+  const prompt = annoBuildAgentPrompt(pending, { zh: true });
+  const order = ['批注：first', '批注：second', '批注：third'].map((needle) => prompt.indexOf(needle));
+  assert.ok(order.every((at) => at >= 0), prompt);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), prompt);
+});
+
 test('builds the agent message from quotes, locations and notes', () => {
   const chat = annoNormalizeAnnotation({
     id: 'm-chat',
